@@ -1,0 +1,496 @@
+@import 'tailwindcss';
+
+@theme {
+  /* Color Tokens */
+  --color-background: #0A0A0A;
+  --color-foreground: #FAFAFA;
+  --color-card: #171717;
+  --color-card-foreground: #FAFAFA;
+  --color-popover: #171717;
+  --color-popover-foreground: #FAFAFA;
+  --color-primary: #06B6D4;
+  --color-primary-foreground: #0A0A0A;
+  --color-secondary: #262626;
+  --color-secondary-foreground: #FAFAFA;
+  --color-muted: #262626;
+  --color-muted-foreground: #A3A3A3;
+  --color-accent: #262626;
+  --color-accent-foreground: #FAFAFA;
+  --color-destructive: #EF4444;
+  --color-destructive-foreground: #FAFAFA;
+  --color-border: #262626;
+  --color-input: #262626;
+  --color-ring: #06B6D4;
+
+  /* Tag Colors */
+  --color-tag-image: #3B82F6;
+  --color-tag-element: #EF4444;
+  --color-tag-video: #8B5CF6;
+
+  /* Node Colors */
+  --color-node-bg: #171717;
+  --color-node-border: #262626;
+  --color-node-handle: #525252;
+
+  /* Border Radius */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+/* React Flow Overrides */
+.react-flow {
+  background: var(--color-background) !important;
+}
+
+/* Fix canvas cursor - should be default, not grab */
+.react-flow__pane {
+  cursor: default !important;
+}
+
+.react-flow__pane.dragging {
+  cursor: grabbing !important;
+}
+
+/* Nodes should not have grab cursor by default */
+.react-flow__node {
+  cursor: default !important;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+.react-flow__background {
+  background: var(--color-background) !important;
+}
+
+.react-flow__background-pattern {
+  stroke: #1a1a1a !important;
+}
+
+.react-flow__edge-path {
+  stroke: var(--color-node-border) !important;
+  stroke-width: 2 !important;
+}
+
+.react-flow__edge.selected .react-flow__edge-path {
+  stroke: var(--color-primary) !important;
+}
+
+.react-flow__handle {
+  width: 12px !important;
+  height: 12px !important;
+  background: var(--color-node-handle) !important;
+  border: 2px solid var(--color-node-border) !important;
+  border-radius: 50% !important;
+}
+
+.react-flow__handle:hover {
+  background: var(--color-primary) !important;
+  border-color: var(--color-primary) !important;
+}
+
+.react-flow__handle.connecting {
+  background: var(--color-primary) !important;
+}
+
+.react-flow__minimap {
+  background: var(--color-card) !important;
+  border-radius: var(--radius-lg) !important;
+  border: 1px solid var(--color-border) !important;
+}
+
+.react-flow__controls {
+  border-radius: var(--radius-lg) !important;
+  border: 1px solid var(--color-border) !important;
+  overflow: hidden;
+}
+
+.react-flow__controls-button {
+  background: var(--color-card) !important;
+  border-color: var(--color-border) !important;
+  color: var(--color-foreground) !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--color-secondary) !important;
+}
+
+/* Node Styling */
+.nova-node {
+  background: var(--color-node-bg);
+  border: 1px solid var(--color-node-border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  min-width: 200px;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+}
+
+.nova-node:hover {
+  border-color: #404040;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -4px rgba(0, 0, 0, 0.2);
+}
+
+.nova-node.selected {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(6, 182, 212, 0.2), 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+}
+
+/* Node Dragging State */
+.react-flow__node.dragging .nova-node {
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+  transform: scale(1.02);
+  cursor: grabbing;
+}
+
+/* Drag Handle */
+.nova-drag-handle {
+  cursor: grab;
+  padding: 4px;
+  margin: -4px;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s ease;
+}
+
+.nova-drag-handle:hover {
+  background: var(--color-secondary);
+}
+
+.nova-drag-handle:active {
+  cursor: grabbing;
+  background: var(--color-secondary);
+}
+
+/* Node Header with Drag Handle */
+.nova-node-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.nova-node-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nova-node-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+}
+
+.nova-node-icon-prompt {
+  background: rgba(6, 182, 212, 0.2);
+  color: var(--color-primary);
+}
+
+.nova-node-icon-image {
+  background: rgba(59, 130, 246, 0.2);
+  color: var(--color-tag-image);
+}
+
+.nova-node-icon-video {
+  background: rgba(139, 92, 246, 0.2);
+  color: var(--color-tag-video);
+}
+
+.nova-node-icon-element {
+  background: rgba(239, 68, 68, 0.2);
+  color: var(--color-tag-element);
+}
+
+.nova-node-icon-output {
+  background: rgba(34, 197, 94, 0.2);
+  color: #22C55E;
+}
+
+/* Node Highlighting */
+.nova-node.highlighted-image {
+  border-color: var(--color-tag-image);
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.4);
+  animation: pulse-blue 2s infinite;
+}
+
+.nova-node.highlighted-element {
+  border-color: var(--color-tag-element);
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
+  animation: pulse-red 2s infinite;
+}
+
+.nova-node.highlighted-video {
+  border-color: var(--color-tag-video);
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.4);
+  animation: pulse-purple 2s infinite;
+}
+
+@keyframes pulse-blue {
+  0%, 100% {
+    box-shadow: 0 0 10px rgba(59, 130, 246, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(59, 130, 246, 0.6);
+  }
+}
+
+@keyframes pulse-red {
+  0%, 100% {
+    box-shadow: 0 0 10px rgba(239, 68, 68, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(239, 68, 68, 0.6);
+  }
+}
+
+@keyframes pulse-purple {
+  0%, 100% {
+    box-shadow: 0 0 10px rgba(139, 92, 246, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 25px rgba(139, 92, 246, 0.6);
+  }
+}
+
+/* Role badge pop animation */
+@keyframes role-pop {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.1);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.animate-role-pop {
+  animation: role-pop 0.2s ease-out;
+}
+
+/* Tag Badges */
+.tag-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.tag-badge-image {
+  background: rgba(59, 130, 246, 0.2);
+  color: #60A5FA;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.tag-badge-element {
+  background: rgba(239, 68, 68, 0.2);
+  color: #F87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.tag-badge-video {
+  background: rgba(139, 92, 246, 0.2);
+  color: #A78BFA;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+/* Generation Progress */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.generating-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-node-bg) 0%,
+    var(--color-secondary) 50%,
+    var(--color-node-bg) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-background);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-secondary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #404040;
+}
+
+/* Drag and Drop Zone */
+.dropzone-active {
+  border: 2px dashed var(--color-primary);
+  background: rgba(6, 182, 212, 0.05);
+}
+
+/* Connection Line Preview */
+.react-flow__connection-line {
+  stroke: var(--color-primary) !important;
+  stroke-width: 2 !important;
+  stroke-dasharray: 5 5;
+  animation: connection-dash 0.5s linear infinite;
+}
+
+@keyframes connection-dash {
+  to {
+    stroke-dashoffset: -10;
+  }
+}
+
+/* Handle validation states */
+.react-flow__handle.valid {
+  background: var(--color-primary) !important;
+  border-color: var(--color-primary) !important;
+  transform: scale(1.2);
+}
+
+.react-flow__handle.invalid {
+  background: var(--color-destructive) !important;
+  border-color: var(--color-destructive) !important;
+}
+
+/* Node Delete Button - Subtle */
+.nova-node-delete {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-muted-foreground);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: all 0.15s ease;
+  cursor: pointer;
+  z-index: 10;
+}
+
+.nova-node:hover .nova-node-delete {
+  opacity: 0.4;
+}
+
+.nova-node-delete:hover {
+  opacity: 1;
+  background: var(--color-secondary);
+  color: var(--color-destructive);
+}
+
+/* Node Actions */
+.nova-node-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.nova-node-action {
+  padding: 4px;
+  border-radius: var(--radius-sm);
+  color: var(--color-muted-foreground);
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+
+.nova-node-action:hover {
+  background: var(--color-secondary);
+  color: var(--color-foreground);
+}
+
+/* Edge Labels */
+.react-flow__edge-textwrapper {
+  pointer-events: all;
+}
+
+.nova-edge-label {
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  font-weight: 500;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Canvas Selection Box */
+.react-flow__selection {
+  background: rgba(6, 182, 212, 0.1) !important;
+  border: 1px solid var(--color-primary) !important;
+}
+
+/* Loading Overlay */
+.nova-loading-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-lg);
+  z-index: 10;
+}
+
+/* Progress Bar */
+.nova-progress {
+  height: 4px;
+  background: var(--color-secondary);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.nova-progress-bar {
+  height: 100%;
+  background: var(--color-primary);
+  transition: width 0.3s ease;
+}
+
+/* Tooltip */
+.nova-tooltip {
+  position: absolute;
+  background: var(--color-popover);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--color-popover-foreground);
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+  z-index: 50;
+  pointer-events: none;
+  white-space: nowrap;
+}
