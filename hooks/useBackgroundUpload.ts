@@ -2,104 +2,124 @@
 
 import { useCallback, useRef } from 'react';
 import { useCanvasStore } from '@/stores';
+import { useAuth } from '@/contexts/AuthContext';
 import type { UploadStatus } from '@/types';
 
 // Global map to track pending uploads (nodeId -> Promise<string>)
 const pendingUploads = new Map<string, Promise<string>>();
+// Latest upload per node (node-level uploads) and the file it is uploading
+const latestUploadToken = new Map<string, symbol>();
+const inFlightFiles = new Map<string, File>();
 
-// Upload a file to fal.ai via our API
-async function uploadToFal(file: File): Promise<string> {
+/**
+ * Upload a file to Cloudflare R2 via our authenticated API.
+ * Returns a permanent public URL that works as both:
+ * - Persistent display URL (never expires, unlike fal.ai)
+ * - Input URL for fal.ai generation (public HTTPS, accessible by fal.ai)
+ */
+async function uploadToR2(file: File, authToken: string): Promise<string> {
   const formData = new FormData();
   formData.append('file', file);
 
-  const response = await fetch('/api/fal/upload', {
+  const response = await fetch('/api/r2/upload', {
     method: 'POST',
+    headers: {
+      Authorization: `Bearer ${authToken}`,
+    },
     body: formData,
   });
 
   if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Upload failed');
+    const error = await response.json().catch(() => ({ error: 'Upload failed' }));
+    throw new Error((error as { error: string }).error || 'Upload failed');
   }
 
   const result = await response.json();
-  return result.url;
+  return (result as { url: string }).url;
 }
 
 export function useBackgroundUpload() {
   const { updateNode } = useCanvasStore();
+  const { user } = useAuth();
   const uploadingRef = useRef(new Set<string>());
 
-  // Start background upload for an image/video node
+  const getToken = useCallback(async (): Promise<string> => {
+    if (!user) throw new Error('Not authenticated');
+    return user.getIdToken();
+  }, [user]);
+
+  // Start background upload for an image/video/audio node.
+  // Replacing the file mid-upload starts a new upload; the superseded one is discarded when it settles.
   const startUpload = useCallback(
-    async (nodeId: string, file: File, nodeType: 'image' | 'video') => {
-      // Prevent duplicate uploads
-      if (uploadingRef.current.has(nodeId)) {
-        console.log('[BackgroundUpload] Already uploading for node:', nodeId);
-        return;
-      }
+    async (nodeId: string, file: File, _nodeType: 'image' | 'video' | 'audio'): Promise<string | undefined> => {
+      if (inFlightFiles.get(nodeId) === file) return pendingUploads.get(nodeId);
 
-      uploadingRef.current.add(nodeId);
-      console.log('[BackgroundUpload] Starting upload for node:', nodeId, 'file:', file.name);
+      const token = Symbol(nodeId);
+      latestUploadToken.set(nodeId, token);
+      inFlightFiles.set(nodeId, file);
+      const isLatest = () => latestUploadToken.get(nodeId) === token;
 
-      // Update node to show uploading status
       updateNode(nodeId, {
         uploadStatus: 'uploading' as UploadStatus,
         uploadError: undefined,
+        remoteUrl: undefined,
       });
 
-      // Create the upload promise
-      const uploadPromise = uploadToFal(file)
+      const uploadPromise = (async () => {
+        const token = await getToken();
+        return uploadToR2(file, token);
+      })()
         .then((remoteUrl) => {
-          console.log('[BackgroundUpload] Upload completed for node:', nodeId, 'url:', remoteUrl);
-          updateNode(nodeId, {
-            uploadStatus: 'completed' as UploadStatus,
-            remoteUrl,
-          });
+          if (isLatest()) {
+            updateNode(nodeId, {
+              uploadStatus: 'completed' as UploadStatus,
+              remoteUrl,
+            });
+          }
           return remoteUrl;
         })
         .catch((error) => {
           console.error('[BackgroundUpload] Upload failed for node:', nodeId, error);
-          updateNode(nodeId, {
-            uploadStatus: 'error' as UploadStatus,
-            uploadError: error.message,
-          });
+          if (isLatest()) {
+            updateNode(nodeId, {
+              uploadStatus: 'error' as UploadStatus,
+              uploadError: error instanceof Error ? error.message : 'Upload failed',
+            });
+          }
           throw error;
         })
         .finally(() => {
-          uploadingRef.current.delete(nodeId);
-          pendingUploads.delete(nodeId);
+          if (isLatest()) {
+            latestUploadToken.delete(nodeId);
+            inFlightFiles.delete(nodeId);
+            pendingUploads.delete(nodeId);
+          }
         });
 
-      // Store the promise for later reference
       pendingUploads.set(nodeId, uploadPromise);
-
       return uploadPromise;
     },
-    [updateNode]
+    [updateNode, getToken]
   );
 
   // Start background upload for an element node (frontal image)
   const startElementFrontalUpload = useCallback(
     async (nodeId: string, file: File) => {
       const uploadKey = `${nodeId}:frontal`;
-
-      if (uploadingRef.current.has(uploadKey)) {
-        console.log('[BackgroundUpload] Already uploading frontal for element:', nodeId);
-        return;
-      }
+      if (uploadingRef.current.has(uploadKey)) return;
 
       uploadingRef.current.add(uploadKey);
-      console.log('[BackgroundUpload] Starting frontal upload for element:', nodeId);
 
       updateNode(nodeId, {
         frontalUploadStatus: 'uploading' as UploadStatus,
         frontalUploadError: undefined,
       });
 
-      const uploadPromise = uploadToFal(file)
+      const uploadPromise = (async () => {
+        const token = await getToken();
+        return uploadToR2(file, token);
+      })()
         .then((remoteUrl) => {
-          console.log('[BackgroundUpload] Frontal upload completed for element:', nodeId);
           updateNode(nodeId, {
             frontalUploadStatus: 'completed' as UploadStatus,
             frontalRemoteUrl: remoteUrl,
@@ -107,10 +127,10 @@ export function useBackgroundUpload() {
           return remoteUrl;
         })
         .catch((error) => {
-          console.error('[BackgroundUpload] Frontal upload failed for element:', nodeId, error);
+          console.error('[BackgroundUpload] Frontal upload failed:', nodeId, error);
           updateNode(nodeId, {
             frontalUploadStatus: 'error' as UploadStatus,
-            frontalUploadError: error.message,
+            frontalUploadError: error instanceof Error ? error.message : 'Upload failed',
           });
           throw error;
         })
@@ -122,7 +142,7 @@ export function useBackgroundUpload() {
       pendingUploads.set(uploadKey, uploadPromise);
       return uploadPromise;
     },
-    [updateNode]
+    [updateNode, getToken]
   );
 
   // Start background upload for element reference images
@@ -131,34 +151,31 @@ export function useBackgroundUpload() {
       if (files.length === 0) return;
 
       const uploadKey = `${nodeId}:references`;
-
-      if (uploadingRef.current.has(uploadKey)) {
-        console.log('[BackgroundUpload] Already uploading references for element:', nodeId);
-        return;
-      }
+      if (uploadingRef.current.has(uploadKey)) return;
 
       uploadingRef.current.add(uploadKey);
-      console.log('[BackgroundUpload] Starting reference uploads for element:', nodeId);
 
       updateNode(nodeId, {
         referenceUploadStatus: 'uploading' as UploadStatus,
         referenceUploadError: undefined,
       });
 
-      const uploadPromise = Promise.all(files.map((file) => uploadToFal(file)))
+      const uploadPromise = (async () => {
+        const token = await getToken();
+        return Promise.all(files.map((file) => uploadToR2(file, token)));
+      })()
         .then((remoteUrls) => {
-          console.log('[BackgroundUpload] Reference uploads completed for element:', nodeId);
           updateNode(nodeId, {
             referenceUploadStatus: 'completed' as UploadStatus,
             referenceRemoteUrls: remoteUrls,
           });
-          return remoteUrls.join(','); // Return joined for the promise map
+          return remoteUrls.join(',');
         })
         .catch((error) => {
-          console.error('[BackgroundUpload] Reference uploads failed for element:', nodeId, error);
+          console.error('[BackgroundUpload] Reference uploads failed:', nodeId, error);
           updateNode(nodeId, {
             referenceUploadStatus: 'error' as UploadStatus,
-            referenceUploadError: error.message,
+            referenceUploadError: error instanceof Error ? error.message : 'Upload failed',
           });
           throw error;
         })
@@ -170,21 +187,20 @@ export function useBackgroundUpload() {
       pendingUploads.set(uploadKey, uploadPromise);
       return uploadPromise;
     },
-    [updateNode]
+    [updateNode, getToken]
   );
 
-  // Check if a node has a pending upload
   const hasPendingUpload = useCallback((nodeId: string): boolean => {
-    return pendingUploads.has(nodeId) ||
-           pendingUploads.has(`${nodeId}:frontal`) ||
-           pendingUploads.has(`${nodeId}:references`);
+    return (
+      pendingUploads.has(nodeId) ||
+      pendingUploads.has(`${nodeId}:frontal`) ||
+      pendingUploads.has(`${nodeId}:references`)
+    );
   }, []);
 
-  // Wait for a specific node's upload to complete
   const waitForUpload = useCallback(async (nodeId: string): Promise<string | null> => {
     const promise = pendingUploads.get(nodeId);
     if (!promise) return null;
-
     try {
       return await promise;
     } catch {
@@ -192,42 +208,44 @@ export function useBackgroundUpload() {
     }
   }, []);
 
-  // Wait for element uploads to complete
-  const waitForElementUploads = useCallback(async (nodeId: string): Promise<{
-    frontalUrl: string | null;
-    referenceUrls: string[] | null;
-  }> => {
-    const frontalPromise = pendingUploads.get(`${nodeId}:frontal`);
-    const referencesPromise = pendingUploads.get(`${nodeId}:references`);
+  const waitForElementUploads = useCallback(
+    async (
+      nodeId: string
+    ): Promise<{
+      frontalUrl: string | null;
+      referenceUrls: string[] | null;
+    }> => {
+      const frontalPromise = pendingUploads.get(`${nodeId}:frontal`);
+      const referencesPromise = pendingUploads.get(`${nodeId}:references`);
 
-    let frontalUrl: string | null = null;
-    let referenceUrls: string[] | null = null;
+      let frontalUrl: string | null = null;
+      let referenceUrls: string[] | null = null;
 
-    if (frontalPromise) {
-      try {
-        frontalUrl = await frontalPromise;
-      } catch {
-        frontalUrl = null;
+      if (frontalPromise) {
+        try {
+          frontalUrl = await frontalPromise;
+        } catch {
+          frontalUrl = null;
+        }
       }
-    }
 
-    if (referencesPromise) {
-      try {
-        const result = await referencesPromise;
-        referenceUrls = result ? result.split(',') : null;
-      } catch {
-        referenceUrls = null;
+      if (referencesPromise) {
+        try {
+          const result = await referencesPromise;
+          referenceUrls = result ? result.split(',') : null;
+        } catch {
+          referenceUrls = null;
+        }
       }
-    }
 
-    return { frontalUrl, referenceUrls };
-  }, []);
+      return { frontalUrl, referenceUrls };
+    },
+    []
+  );
 
-  // Get all pending upload node IDs
   const getPendingUploadNodeIds = useCallback((): string[] => {
     const nodeIds = new Set<string>();
     for (const key of pendingUploads.keys()) {
-      // Extract node ID from keys like "nodeId" or "nodeId:frontal"
       const nodeId = key.split(':')[0];
       nodeIds.add(nodeId);
     }
@@ -245,5 +263,4 @@ export function useBackgroundUpload() {
   };
 }
 
-// Export pending uploads map for use in useGeneration
 export { pendingUploads };

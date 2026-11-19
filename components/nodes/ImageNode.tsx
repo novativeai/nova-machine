@@ -2,11 +2,12 @@
 
 import { memo, useRef, useCallback, useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { ImageIcon, X, Upload } from 'lucide-react';
+import { ImageIcon, X, Upload, Loader2 } from 'lucide-react';
 import type { ImageNodeData } from '@/types';
 import { useCanvasStore, useModalStore } from '@/stores';
 import { cn, formatFileSize } from '@/lib/utils';
 import { getTagColor } from '@/lib/fal';
+import { HashtagBadges } from './HashtagBadges';
 
 interface ImageNodeProps {
   id: string;
@@ -177,7 +178,7 @@ function ImageNodeComponent({ id, data, selected }: ImageNodeProps) {
       </div>
 
       {/* Role Badge - Clickable to cycle */}
-      <div className="mt-2">
+      <div className="mt-2 flex items-center gap-2">
         <button
           onClick={handleRoleCycle}
           className={cn(
@@ -189,6 +190,18 @@ function ImageNodeComponent({ id, data, selected }: ImageNodeProps) {
           {ROLE_LABELS[data.role]}
         </button>
       </div>
+
+      {/* Character Generation Loading Overlay */}
+      {data.isGeneratingCharacter && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center rounded-lg bg-background/80 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-3">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <span className="text-xs text-muted-foreground">Generating character...</span>
+          </div>
+        </div>
+      )}
+
+      <HashtagBadges nodeId={id} />
 
       {/* Output Handle */}
       <Handle type="source" position={Position.Right} id="output" />

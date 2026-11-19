@@ -1,2 +1,11 @@
 export { useGeneration } from './useGeneration';
 export { useBackgroundUpload, pendingUploads } from './useBackgroundUpload';
+export { useCharacterGeneration } from './useCharacterGeneration';
+export { useAICommand } from './useAICommand';
+export { useChainGeneration } from './useChainGeneration';
+export { useMoodboard } from './useMoodboard';
+export { usePresence } from './usePresence';
+export { useBoardSync } from './useBoardSync';
+export { useAutoBoard } from './useAutoBoard';
+export { useAudioLoader, validateAudioFile, probeAudioDuration } from './useAudioLoader';
+export type { ValidatedAudio } from './useAudioLoader';

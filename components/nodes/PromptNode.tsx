@@ -2,7 +2,7 @@
 
 import { memo, useCallback, useMemo, useRef, useEffect, useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { Play, Loader2, Settings2, DollarSign, X, Film, Image as ImageIcon } from 'lucide-react';
+import { DollarSign, Key, X, Film, Image as ImageIcon, Volume2, VolumeX } from 'lucide-react';
 import { TextureButton } from '@/components/ui';
 import type {
   PromptNodeData,
@@ -12,21 +12,21 @@ import type {
   ElementNodeData,
   OutputNodeData,
   TagType,
-  KlingModel,
-  NanoBananaModel,
 } from '@/types';
-import { useCanvasStore } from '@/stores';
+import { useCanvasStore, useGenerationStore, useSettingsStore } from '@/stores';
 import { useGeneration } from '@/hooks';
 import {
-  selectModel,
-  selectImageModel,
+  formatUsd,
   getModelDisplayName,
+  planGeneration,
   parseTags,
   getTagColor,
-  calculateCost,
-  calculateImageCost,
+  formatNameAsTag,
+  isValidNameForTag,
+  parseNameTags,
 } from '@/lib/fal';
-import { cn, formatCost } from '@/lib/utils';
+import { cn } from '@/lib/utils';
+import { HashtagBadges } from './HashtagBadges';
 import {
   TagAutocomplete,
   useTagAutocomplete,
@@ -41,9 +41,15 @@ interface PromptNodeProps {
 
 function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { updateNode, removeNode, getConnectedInputs, nodes, edges, highlightNode, clearHighlights } =
+  const { updateNode, removeNode, getConnectedInputs, getEdgeTag, nodes, edges, highlightNode, clearHighlights } =
     useCanvasStore();
-  const { startGeneration, isGenerating: isGeneratingGlobal } = useGeneration();
+  const { startGeneration } = useGeneration();
+  // Per-node generation check — only re-renders when THIS node's generation state changes
+  const isThisNodeGenerating = useGenerationStore(
+    useCallback((state) => Object.values(state.activeGenerations).some(
+      (g) => g.promptNodeId === id
+    ), [id])
+  );
 
   // Local state for prompt to prevent cursor jumping
   const [localPrompt, setLocalPrompt] = useState(data.prompt);
@@ -77,93 +83,116 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getConnectedInputs, id, edges, nodeTagsKey]);
 
-  // Build suggestions for autocomplete
+  // Build suggestions for autocomplete - use edge-specific tags for per-prompt scoping
+  // For elements with valid names, use name-based tags (e.g., @Alice instead of @Element1)
   const tagSuggestions: TagSuggestion[] = useMemo(() => {
-    return connectedNodes
-      .filter((node) => {
-        const nodeData = node.data as { tagAssignment?: string };
-        return nodeData.tagAssignment;
-      })
-      .map((node) => {
-        const nodeData = node.data as ImageNodeData | VideoNodeData | ElementNodeData | OutputNodeData;
-        // For output nodes, use their outputType to determine the tag type
-        const tagType: TagType = node.type === 'output'
-          ? ((nodeData as OutputNodeData).outputType as TagType)
-          : (node.type as TagType);
+    const suggestions: TagSuggestion[] = [];
 
-        // Get thumbnail based on node type
-        let thumbnail: string | undefined;
-        if (node.type === 'element') {
-          thumbnail = (nodeData as ElementNodeData).frontalThumbnail;
-        } else {
-          thumbnail = (nodeData as ImageNodeData | VideoNodeData | OutputNodeData).thumbnailUrl;
-        }
+    for (const node of connectedNodes) {
+      // Get the edge-specific tag for THIS prompt (not the node's first-assigned tag)
+      const edgeTag = getEdgeTag(node.id, id);
+      if (!edgeTag) continue;
 
-        // Get name (only for element nodes)
-        const name = node.type === 'element' ? (nodeData as ElementNodeData).name : undefined;
+      const nodeData = node.data as ImageNodeData | VideoNodeData | ElementNodeData | OutputNodeData;
+      // For output nodes, use their outputType to determine the tag type
+      const tagType: TagType = node.type === 'output'
+        ? ((nodeData as OutputNodeData).outputType as TagType)
+        : (node.type as TagType);
 
-        return {
-          tag: (nodeData as { tagAssignment: string }).tagAssignment,
-          type: tagType,
-          nodeId: node.id,
-          thumbnail,
-          name,
-        };
+      // Get thumbnail based on node type
+      let thumbnail: string | undefined;
+      if (node.type === 'element') {
+        thumbnail = (nodeData as ElementNodeData).frontalThumbnail;
+      } else {
+        thumbnail = (nodeData as ImageNodeData | VideoNodeData | OutputNodeData).thumbnailUrl;
+      }
+
+      // Get name (only for element nodes)
+      const name = node.type === 'element' ? (nodeData as ElementNodeData).name : undefined;
+
+      // For elements with valid names, use the name as the display tag
+      // e.g., "Alice" becomes "@Alice", "John Doe" becomes "@John_Doe"
+      let displayTag = edgeTag;
+      let elementTag: string | undefined;
+
+      if (node.type === 'element' && name && isValidNameForTag(name)) {
+        displayTag = formatNameAsTag(name);
+        elementTag = edgeTag; // Keep original element tag for API
+      }
+
+      suggestions.push({
+        tag: displayTag,
+        type: tagType,
+        nodeId: node.id,
+        thumbnail,
+        name,
+        elementTag, // Only set for elements with name-based tags
       });
-  }, [connectedNodes]);
+    }
+
+    return suggestions;
+  }, [connectedNodes, getEdgeTag, id]);
 
   // Tag autocomplete hook
   const autocomplete = useTagAutocomplete(textareaRef, tagSuggestions);
 
-  // Determine selected model based on mode
-  const selectedModel = useMemo((): KlingModel | NanoBananaModel | null => {
-    const isImageMode = data.mode === 'image';
+  // Endpoint + estimated cost, from the same planner useGeneration uses.
+  // Reads connected nodes fresh so role/duration changes on inputs are reflected.
+  const plan = useMemo(
+    () => planGeneration({ ...data, prompt: localPrompt }, getConnectedInputs(id)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [data, localPrompt, getConnectedInputs, id, nodes, edges]
+  );
+  const selectedModel = plan.model;
+  const isAudioToVideo = plan.kind === 'audio-to-video';
 
-    if (isImageMode) {
-      // Image mode: use nano-banana-pro
-      // Text-to-image if no inputs, image-edit if has inputs
-      const inputs = connectedNodes.map((node) => ({
-        nodeId: node.id,
-        nodeType: node.type,
-        handleId: '',
-        tag: undefined, // No tags in image mode
-        outputType: node.type === 'output' ? (node.data as OutputNodeData).outputType : undefined,
-      }));
-      return selectImageModel(inputs);
+  // Check if user has API key configured
+  const hasApiKey = useSettingsStore((s) => s.falApiKey.length > 0);
+
+  // Estimated fal.ai cost in USD, and how it was computed
+  const estimatedCost = plan.costUsd;
+  const costBreakdown = plan.breakdown;
+
+  // Build a map of name tags to their info for parsing
+  const nameTagMap = useMemo(() => {
+    const map = new Map<string, { type: TagType; elementTag: string; nodeId: string }>();
+    for (const suggestion of tagSuggestions) {
+      if (suggestion.elementTag) {
+        // This is a name-based tag (e.g., @Alice -> @Element1)
+        map.set(suggestion.tag, {
+          type: suggestion.type,
+          elementTag: suggestion.elementTag,
+          nodeId: suggestion.nodeId,
+        });
+      }
     }
+    return map;
+  }, [tagSuggestions]);
 
-    // Video mode: require connected nodes
-    if (connectedNodes.length === 0) return null;
+  // Parse all tags from prompt - both standard (@Element1) and name-based (@Alice)
+  const parsedTags = useMemo(() => {
+    const standardTags = parseTags(localPrompt);
+    const nameTags = parseNameTags(localPrompt, Array.from(nameTagMap.keys()));
 
-    try {
-      const inputs = connectedNodes.map((node) => ({
-        nodeId: node.id,
-        nodeType: node.type,
-        handleId: '',
-        tag: (node.data as { tagAssignment?: string }).tagAssignment,
-        outputType: node.type === 'output' ? (node.data as OutputNodeData).outputType : undefined,
-      }));
+    // Convert name tags to a compatible format with type info
+    const enrichedNameTags = nameTags.map((nt) => {
+      const info = nameTagMap.get(nt.tag);
+      return {
+        tag: nt.tag,
+        type: info?.type || ('element' as TagType),
+        index: 0,
+        startPosition: nt.startPosition,
+        endPosition: nt.endPosition,
+        isNameTag: true,
+        nodeId: info?.nodeId,
+      };
+    });
 
-      return selectModel(inputs, localPrompt);
-    } catch {
-      return null;
-    }
-  }, [connectedNodes, localPrompt, data.mode]);
-
-  // Calculate estimated cost based on mode
-  const estimatedCost = useMemo(() => {
-    if (!selectedModel) return null;
-
-    if (data.mode === 'image') {
-      return calculateImageCost(selectedModel as NanoBananaModel, data.imageResolution);
-    }
-
-    const durationSeconds = parseInt(data.duration, 10);
-    return calculateCost(selectedModel as KlingModel, durationSeconds);
-  }, [selectedModel, data.duration, data.mode, data.imageResolution]);
-
-  // Parse tags from prompt and highlight nodes
-  const parsedTags = useMemo(() => parseTags(localPrompt), [localPrompt]);
+    // Combine and sort by position
+    return [...standardTags, ...enrichedNameTags].sort(
+      (a, b) => a.startPosition - b.startPosition
+    );
+  }, [localPrompt, nameTagMap]);
 
   // Highlight nodes when tags are in prompt (debounced to prevent border flashing)
   const highlightTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -179,10 +208,21 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
       clearHighlights();
 
       parsedTags.forEach((tagMatch) => {
-        const node = tagSuggestions.find((s) => s.tag === tagMatch.tag);
-        if (node) {
+        // Check if it's a name tag with nodeId already attached
+        const isNameTag = 'isNameTag' in tagMatch && tagMatch.isNameTag;
+        let nodeId: string | undefined;
+
+        if (isNameTag && 'nodeId' in tagMatch) {
+          nodeId = tagMatch.nodeId as string;
+        } else {
+          // Find by matching the tag (for standard tags like @Element1)
+          const node = tagSuggestions.find((s) => s.tag === tagMatch.tag || s.elementTag === tagMatch.tag);
+          nodeId = node?.nodeId;
+        }
+
+        if (nodeId) {
           const color = getTagColor(tagMatch.type);
-          highlightNode(node.nodeId, color);
+          highlightNode(nodeId, color);
         }
       });
     }, 300); // Longer debounce to prevent flashing
@@ -199,6 +239,17 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
   useEffect(() => {
     return () => clearHighlights();
   }, [clearHighlights]);
+
+  // Auto-dismiss errors after 8 seconds
+  useEffect(() => {
+    if (!data.error) return;
+
+    const timeoutId = setTimeout(() => {
+      updateNode(id, { error: undefined });
+    }, 8000);
+
+    return () => clearTimeout(timeoutId);
+  }, [data.error, id, updateNode]);
 
   // Handle prompt change - use local state for immediate feedback, debounce store sync
   const handlePromptChange = useCallback(
@@ -244,7 +295,7 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
 
   // Handle generate
   const handleGenerate = useCallback(async () => {
-    if (!selectedModel || isGeneratingGlobal) return;
+    if (isThisNodeGenerating) return;
 
     // Sync local prompt to store immediately before generation
     if (syncTimeoutRef.current) {
@@ -261,18 +312,14 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
         error: error instanceof Error ? error.message : 'Generation failed',
       });
     }
-  }, [id, selectedModel, isGeneratingGlobal, startGeneration, updateNode, localPrompt]);
+  }, [id, isThisNodeGenerating, startGeneration, updateNode, localPrompt]);
 
-  // Only show loading shimmer on THIS node when it's generating
-  // (isGeneratingGlobal is still used to disable buttons and prevent multiple simultaneous generations)
+  // Show loading shimmer on THIS node when it's generating
   const isGenerating = data.status === 'generating';
   const isImageMode = data.mode === 'image';
 
-  // In image mode, we can generate with just a prompt (text-to-image)
-  // In video mode, we need connected nodes
-  const canGenerate = isImageMode
-    ? localPrompt.trim().length > 0 && selectedModel && !isGeneratingGlobal
-    : connectedNodes.length > 0 && localPrompt.trim().length > 0 && selectedModel && !isGeneratingGlobal;
+  // A prompt is required, except audio-to-video where the audio (plus optional first frame) drives the video
+  const canGenerate = (localPrompt.trim().length > 0 || isAudioToVideo) && !isThisNodeGenerating;
 
   // Render prompt with highlighted tags
   const renderPromptWithTags = () => {
@@ -408,29 +455,37 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
       </div>
 
       {/* Model & Cost Indicator */}
-      {selectedModel && (
-        <div className="mb-2 flex items-center justify-between rounded bg-secondary px-2 py-1">
+      <div className="mb-2 rounded bg-secondary px-2 py-1">
+        <div className="flex items-center justify-between">
           <span className="text-xs text-muted-foreground">
             {getModelDisplayName(selectedModel)}
           </span>
-          {estimatedCost !== null && (
-            <span className="flex items-center gap-1 text-xs text-green-500">
-              <DollarSign className="h-3 w-3" />
-              {formatCost(estimatedCost)}
-            </span>
-          )}
+          <span
+            className="flex items-center gap-1 text-xs font-medium text-white/60"
+            title="Estimated cost, billed by fal.ai to your own account"
+          >
+            <DollarSign className="h-3 w-3" />
+            ~{formatUsd(estimatedCost).replace('$', '')}
+          </span>
         </div>
-      )}
+        <div className="mt-0.5 text-[10px] leading-snug text-white/35">
+          {costBreakdown}
+          {plan.isEstimate && ' · estimate'}
+        </div>
+      </div>
 
       {/* Connected Tags Preview - Video mode only */}
       {!isImageMode && tagSuggestions.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-1">
           {tagSuggestions.map((suggestion) => {
             const color = getTagColor(suggestion.type);
-            const isUsed = parsedTags.some((t) => t.tag === suggestion.tag);
+            // Check if tag is used - matches display tag OR element tag (backwards compatible)
+            const isUsed = parsedTags.some((t) =>
+              t.tag === suggestion.tag || (suggestion.elementTag && t.tag === suggestion.elementTag)
+            );
             return (
               <span
-                key={suggestion.tag}
+                key={suggestion.nodeId}
                 className={cn(
                   'rounded px-1.5 py-0.5 text-xs transition-all',
                   !isUsed && 'opacity-60'
@@ -550,61 +605,121 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
             >
               <option value="1K">1K</option>
               <option value="2K">2K</option>
-              <option value="4K">4K (+$0.15)</option>
+              <option value="4K">4K</option>
             </select>
           </>
         ) : (
           <>
-            {/* Video Mode: Duration and Aspect Ratio */}
-            <select
-              value={data.duration}
-              onChange={(e) =>
-                updateNode(id, { duration: e.target.value as '5' | '10' })
-              }
-              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
-              disabled={isGenerating}
-            >
-              <option value="5">5 seconds</option>
-              <option value="10">10 seconds</option>
-            </select>
+            {/* Video Mode: Seedance 2.5 settings (audio-to-video length follows the audio) */}
+            {!isAudioToVideo && (
+              <select
+                value={data.duration}
+                onChange={(e) =>
+                  updateNode(id, { duration: e.target.value as PromptNodeData['duration'] })
+                }
+                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
+                disabled={isGenerating}
+                title="Duration"
+              >
+                {(['4', '5', '6', '8', '10', '12', '15'] as const).map((d) => (
+                  <option key={d} value={d}>{d}s</option>
+                ))}
+              </select>
+            )}
             <select
               value={data.aspectRatio}
               onChange={(e) =>
                 updateNode(id, {
-                  aspectRatio: e.target.value as '16:9' | '9:16' | '1:1',
+                  aspectRatio: e.target.value as PromptNodeData['aspectRatio'],
                 })
               }
               className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
-              disabled={isGenerating}
+              disabled={isGenerating || selectedModel === 'bytedance/seedance-2.5/us/image-to-video'}
+              title={selectedModel === 'bytedance/seedance-2.5/us/image-to-video' ? 'Follows the start frame' : 'Aspect ratio'}
             >
-              <option value="16:9">16:9</option>
-              <option value="9:16">9:16</option>
-              <option value="1:1">1:1</option>
+              {(isAudioToVideo
+                ? (['16:9', '9:16'] as const)
+                : (['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const)
+              ).map((ratio) => (
+                <option key={ratio} value={ratio}>{ratio}</option>
+              ))}
             </select>
+            {!isAudioToVideo && (
+              <select
+                value={data.videoResolution}
+                onChange={(e) =>
+                  updateNode(id, { videoResolution: e.target.value as PromptNodeData['videoResolution'] })
+                }
+                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
+                disabled={isGenerating}
+                title="Resolution"
+              >
+                <option value="480p">480p</option>
+                <option value="720p">720p</option>
+                <option value="1080p">1080p</option>
+              </select>
+            )}
+            {/* Audio toggle — Seedance charges the same with or without audio */}
+            {!isAudioToVideo && (
+              <button
+                type="button"
+                onClick={() => updateNode(id, { generateAudio: !data.generateAudio })}
+                className={cn(
+                  'flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded border transition-all',
+                  data.generateAudio
+                    ? 'border-primary/50 bg-primary/10 text-primary'
+                    : 'border-border bg-background text-muted-foreground hover:text-foreground'
+                )}
+                disabled={isGenerating}
+                title={data.generateAudio ? 'Audio enabled' : 'Audio disabled'}
+              >
+                {data.generateAudio ? (
+                  <Volume2 className="h-3.5 w-3.5" />
+                ) : (
+                  <VolumeX className="h-3.5 w-3.5" />
+                )}
+              </button>
+            )}
           </>
         )}
       </div>
 
       {/* Generate Button */}
-      <TextureButton
-        onClick={handleGenerate}
-        disabled={!canGenerate || isGenerating}
-        variant={canGenerate && !isGenerating ? 'accent' : 'secondary'}
-        className="w-full"
-        loading={isGenerating}
-      >
-        {isGenerating
-          ? `Generating... ${Math.round(data.progress)}%`
-          : isImageMode
-            ? 'Generate Image'
-            : 'Generate Video'
-        }
-      </TextureButton>
+      {!hasApiKey ? (
+        <div className="flex items-center gap-2 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2">
+          <Key className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+          <span className="text-xs text-amber-300/80">
+            Add your own fal.ai API key (key icon in the header) to generate. It stays in your browser and is sent only to fal.ai.
+          </span>
+        </div>
+      ) : (
+        <TextureButton
+          onClick={handleGenerate}
+          disabled={!canGenerate || isGenerating}
+          variant={canGenerate && !isGenerating ? 'accent' : 'secondary'}
+          className="w-full"
+          loading={isGenerating}
+        >
+          {isGenerating
+            ? `Generating... ${Math.round(data.progress)}%`
+            : isImageMode
+              ? 'Generate Image'
+              : 'Generate Video'
+          }
+        </TextureButton>
+      )}
 
-      {/* Status */}
+      {/* Error Status */}
       {data.error && (
-        <div className="mt-2 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
-          {data.error}
+        <div className="mt-2 flex items-start gap-1.5 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+          <span className="flex-1">{data.error}</span>
+          <button
+            onClick={() => updateNode(id, { error: undefined })}
+            className="mt-0.5 rounded p-0.5 transition-colors hover:bg-destructive/20"
+            title="Dismiss error"
+          >
+            <X className="h-3 w-3" />
+          </button>
         </div>
       )}
 
@@ -615,6 +730,9 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
           connected (assign tags to reference them)
         </div>
       )}
+
+      {/* Hashtag badges */}
+      <HashtagBadges nodeId={id} />
 
       {/* Output Handle */}
       <Handle type="source" position={Position.Right} id="output" />

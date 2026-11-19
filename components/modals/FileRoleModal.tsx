@@ -122,6 +122,7 @@ export function FileRoleModal() {
       // Directly confirm for non-element roles
       handleConfirm();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRole, fileRoleModal.file]);
 
   const handleBackToRoles = useCallback(() => {

@@ -1,4 +1,4 @@
-import type { TagType, TagMatch, TAG_COLORS } from '@/types';
+import type { TagType, TagMatch } from '@/types';
 
 /**
  * Regular expressions for parsing tags in prompts
@@ -164,4 +164,132 @@ export function createTagSuggestions(
     nodeId: node.id,
     preview: node.thumbnail,
   }));
+}
+
+/**
+ * Format a name as a valid tag (replace spaces with underscores, strip special chars)
+ * Example: "John Doe" → "@John_Doe"
+ */
+export function formatNameAsTag(name: string): string {
+  // Replace spaces with underscores, remove non-alphanumeric except underscores
+  const formatted = name
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-zA-Z0-9_]/g, '');
+  return `@${formatted}`;
+}
+
+/**
+ * Check if a name is valid for use as a tag (not default/empty)
+ */
+export function isValidNameForTag(name: string): boolean {
+  const trimmed = name.trim();
+  // Invalid if empty, "New Element", or only special characters
+  if (!trimmed || trimmed === 'New Element') return false;
+  // Must have at least one alphanumeric character
+  return /[a-zA-Z0-9]/.test(trimmed);
+}
+
+/**
+ * Interface for name-based tag match
+ */
+export interface NameTagMatch {
+  tag: string;           // The full tag string (e.g., "@Alice")
+  name: string;          // The name portion (e.g., "Alice")
+  startPosition: number;
+  endPosition: number;
+}
+
+/**
+ * Parse name-based tags from a prompt string
+ * Matches patterns like @Alice, @John_Doe (capitalized, alphanumeric with underscores)
+ */
+export function parseNameTags(prompt: string, knownNameTags: string[]): NameTagMatch[] {
+  const matches: NameTagMatch[] = [];
+
+  // Create a regex that matches any of the known name tags
+  if (knownNameTags.length === 0) return matches;
+
+  // Escape special regex characters and sort by length (longest first to avoid partial matches)
+  const sortedTags = [...knownNameTags].sort((a, b) => b.length - a.length);
+  const escapedTags = sortedTags.map((tag) => tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const pattern = new RegExp(`(${escapedTags.join('|')})(?![a-zA-Z0-9_])`, 'g');
+
+  let match;
+  while ((match = pattern.exec(prompt)) !== null) {
+    const tag = match[1];
+    matches.push({
+      tag,
+      name: tag.slice(1).replace(/_/g, ' '), // Remove @ and convert underscores to spaces
+      startPosition: match.index,
+      endPosition: match.index + tag.length,
+    });
+  }
+
+  return matches.sort((a, b) => a.startPosition - b.startPosition);
+}
+
+/**
+ * Parse all tags from a prompt - both standard (@Element1) and name-based (@Alice)
+ */
+export function parseAllTags(
+  prompt: string,
+  nameTagMap: Map<string, { type: TagType; elementTag: string }>
+): Array<TagMatch | (NameTagMatch & { type: TagType; elementTag: string })> {
+  const standardTags = parseTags(prompt);
+  const nameTags = parseNameTags(prompt, Array.from(nameTagMap.keys()));
+
+  // Combine and enrich name tags with type info
+  const enrichedNameTags = nameTags.map((nt) => {
+    const info = nameTagMap.get(nt.tag);
+    return {
+      ...nt,
+      type: info?.type || 'element' as TagType,
+      elementTag: info?.elementTag || nt.tag,
+      index: 0, // Name tags don't have numeric indices
+    };
+  });
+
+  // Combine all tags and sort by position
+  const allTags = [...standardTags, ...enrichedNameTags];
+  return allTags.sort((a, b) => a.startPosition - b.startPosition);
+}
+
+/**
+ * Translate name tags to element tags in a prompt for API submission
+ */
+export function translateNameTagsForApi(
+  prompt: string,
+  nameTagMap: Map<string, string> // nameTag -> elementTag (e.g., "@Alice" -> "@Element1")
+): string {
+  let translated = prompt;
+
+  // Sort by tag length descending to avoid partial replacements
+  const sortedEntries = Array.from(nameTagMap.entries()).sort(
+    ([a], [b]) => b.length - a.length
+  );
+
+  for (const [nameTag, elementTag] of sortedEntries) {
+    // Use word boundary to avoid partial matches
+    const escaped = nameTag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(`${escaped}(?![a-zA-Z0-9_])`, 'g');
+    translated = translated.replace(pattern, elementTag);
+  }
+
+  return translated;
+}
+
+/**
+ * Validate tags including name-based tags
+ */
+export function validateAllTags(
+  prompt: string,
+  connectedTags: string[],           // Standard tags like @Element1
+  nameTagToElementTag: Map<string, string> // Name tags mapped to element tags
+): { valid: boolean; missing: string[] } {
+  // First, translate any name tags to their element counterparts
+  const translatedPrompt = translateNameTagsForApi(prompt, nameTagToElementTag);
+
+  // Now validate the translated prompt
+  return validateTags(translatedPrompt, connectedTags);
 }

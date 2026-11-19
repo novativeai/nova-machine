@@ -7,11 +7,12 @@ import { getTagColor } from '@/lib/fal';
 import type { TagType } from '@/types';
 
 export interface TagSuggestion {
-  tag: string;
+  tag: string;           // Display tag: @Alice (for elements with names) or @Image1
   type: TagType;
   nodeId: string;
   thumbnail?: string;
   name?: string;
+  elementTag?: string;   // Original element tag for API (@Element1) - only for elements
 }
 
 interface TagAutocompleteProps {
@@ -94,7 +95,7 @@ export function TagAutocomplete({
           const color = getTagColor(suggestion.type);
           return (
             <button
-              key={suggestion.tag}
+              key={suggestion.nodeId}
               onClick={() => onSelect(suggestion.tag)}
               className={cn(
                 'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors',
@@ -171,9 +172,6 @@ export function useTagAutocomplete(
       if (!queryText.includes(' ')) {
         setQuery(queryText);
         setIsOpen(true);
-
-        // Calculate position based on textarea and cursor
-        const textareaRect = textarea.getBoundingClientRect();
 
         // Simple positioning below the textarea line
         setPosition({

@@ -1,19 +1,18 @@
 import { create } from 'zustand';
 import type {
-  KlingModel,
-  NanoBananaModel,
-  KlingInput,
-  NanoBananaInput,
+  GenerationModel,
   GenerationProgress,
   GenerationResult,
-  GenerationMetadata,
+  ImageGenerationInput,
+  LtxAudioToVideoInput,
+  VideoGenerationInput,
 } from '@/types';
 
 export interface GenerationRequest {
   id: string;
   promptNodeId: string;
-  model: KlingModel | NanoBananaModel;
-  input: KlingInput | NanoBananaInput;
+  model: GenerationModel;
+  input: VideoGenerationInput | ImageGenerationInput | LtxAudioToVideoInput;
   status: 'queued' | 'processing' | 'completed' | 'failed';
   progress?: GenerationProgress;
   result?: GenerationResult;
@@ -23,11 +22,8 @@ export interface GenerationRequest {
 interface GenerationState {
   // Queue
   queue: GenerationRequest[];
-  activeGeneration: GenerationRequest | null;
+  activeGenerations: Record<string, GenerationRequest>; // keyed by request ID
   history: GenerationRequest[];
-
-  // Status
-  isGenerating: boolean;
 
   // Operations
   addToQueue: (request: Omit<GenerationRequest, 'status' | 'createdAt'>) => void;
@@ -36,14 +32,14 @@ interface GenerationState {
   setActiveGeneration: (request: GenerationRequest | null) => void;
   completeGeneration: (id: string, result: GenerationResult) => void;
   failGeneration: (id: string, error: string) => void;
+  isNodeGenerating: (promptNodeId: string) => boolean;
   clearHistory: () => void;
 }
 
 export const useGenerationStore = create<GenerationState>((set, get) => ({
   queue: [],
-  activeGeneration: null,
+  activeGenerations: {},
   history: [],
-  isGenerating: false,
 
   addToQueue: (request) => {
     const newRequest: GenerationRequest = {
@@ -62,10 +58,9 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
       queue: state.queue.map((req) =>
         req.id === id ? { ...req, ...updates } : req
       ),
-      activeGeneration:
-        state.activeGeneration?.id === id
-          ? { ...state.activeGeneration, ...updates }
-          : state.activeGeneration,
+      activeGenerations: state.activeGenerations[id]
+        ? { ...state.activeGenerations, [id]: { ...state.activeGenerations[id], ...updates } }
+        : state.activeGenerations,
     }));
   },
 
@@ -76,35 +71,41 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
   },
 
   setActiveGeneration: (request) => {
-    set({
-      activeGeneration: request,
-      isGenerating: request !== null,
-    });
+    if (request === null) return;
+    set((state) => ({
+      activeGenerations: { ...state.activeGenerations, [request.id]: request },
+    }));
   },
 
   completeGeneration: (id, result) => {
-    const { activeGeneration, queue } = get();
+    const { activeGenerations } = get();
+    const activeGeneration = activeGenerations[id];
 
-    if (activeGeneration?.id === id) {
+    if (activeGeneration) {
       const completedRequest: GenerationRequest = {
         ...activeGeneration,
         status: 'completed',
         result,
       };
 
-      set((state) => ({
-        activeGeneration: null,
-        isGenerating: false,
-        history: [...state.history, completedRequest],
-        queue: state.queue.filter((req) => req.id !== id),
-      }));
+      set((state) => {
+        const { [id]: _, ...remaining } = state.activeGenerations;
+        // Cap history at 50 entries to prevent memory leaks
+        const newHistory = [...state.history, completedRequest].slice(-50);
+        return {
+          activeGenerations: remaining,
+          history: newHistory,
+          queue: state.queue.filter((req) => req.id !== id),
+        };
+      });
     }
   },
 
   failGeneration: (id, error) => {
-    const { activeGeneration } = get();
+    const { activeGenerations } = get();
+    const activeGeneration = activeGenerations[id];
 
-    if (activeGeneration?.id === id) {
+    if (activeGeneration) {
       const failedRequest: GenerationRequest = {
         ...activeGeneration,
         status: 'failed',
@@ -115,13 +116,24 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
         },
       };
 
-      set((state) => ({
-        activeGeneration: null,
-        isGenerating: false,
-        history: [...state.history, failedRequest],
-        queue: state.queue.filter((req) => req.id !== id),
-      }));
+      set((state) => {
+        const { [id]: _, ...remaining } = state.activeGenerations;
+        // Cap history at 50 entries to prevent memory leaks
+        const newHistory = [...state.history, failedRequest].slice(-50);
+        return {
+          activeGenerations: remaining,
+          history: newHistory,
+          queue: state.queue.filter((req) => req.id !== id),
+        };
+      });
     }
+  },
+
+  isNodeGenerating: (promptNodeId) => {
+    const { activeGenerations } = get();
+    return Object.values(activeGenerations).some(
+      (g) => g.promptNodeId === promptNodeId
+    );
   },
 
   clearHistory: () => {

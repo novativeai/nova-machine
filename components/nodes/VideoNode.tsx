@@ -7,6 +7,7 @@ import type { VideoNodeData } from '@/types';
 import { useCanvasStore, useModalStore } from '@/stores';
 import { cn, formatFileSize, formatDuration } from '@/lib/utils';
 import { getTagColor } from '@/lib/fal';
+import { HashtagBadges } from './HashtagBadges';
 
 interface VideoNodeProps {
   id: string;
@@ -155,6 +156,8 @@ function VideoNodeComponent({ id, data, selected }: VideoNodeProps) {
           {data.role === 'edit_source' ? 'Edit Source' : 'Reference'}
         </span>
       </div>
+
+      <HashtagBadges nodeId={id} />
 
       {/* Output Handle */}
       <Handle type="source" position={Position.Right} id="output" />

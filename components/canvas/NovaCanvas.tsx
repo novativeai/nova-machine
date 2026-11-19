@@ -13,12 +13,14 @@ import {
   type Node,
   type OnReconnect,
   BackgroundVariant,
-  reconnectEdge,
+  useReactFlow,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 
-import { useCanvasStore } from '@/stores';
-import { useModalStore } from '@/stores';
+import { createNode, useCanvasStore, useAssetStore, useModalStore, useProjectStore } from '@/stores';
+import { useAudioLoader, validateAudioFile } from '@/hooks';
+import { AUDIO_FORMATS_LABEL, isAudioFile } from '@/lib/media/audio';
+import { toast } from '@/lib/toast';
 import { PromptNode } from '@/components/nodes/PromptNode';
 import { ImageNode } from '@/components/nodes/ImageNode';
 import { VideoNode } from '@/components/nodes/VideoNode';
@@ -26,6 +28,7 @@ import { ElementNode } from '@/components/nodes/ElementNode';
 import { OutputNode } from '@/components/nodes/OutputNode';
 import { CameraNode } from '@/components/nodes/CameraNode';
 import { LightingNode } from '@/components/nodes/LightingNode';
+import { AudioNode } from '@/components/nodes/AudioNode';
 import { TaggedEdge } from '@/components/edges/TaggedEdge';
 import { isImageFile, isVideoFile } from '@/lib/utils';
 import { getTagColor } from '@/lib/fal';
@@ -34,9 +37,8 @@ import type {
   ImageNodeData,
   VideoNodeData,
   ElementNodeData,
-  TagType,
   NovaNode,
-  NovaEdge,
+  AssetDragData,
 } from '@/types';
 
 const nodeTypes: NodeTypes = {
@@ -47,13 +49,18 @@ const nodeTypes: NodeTypes = {
   output: OutputNode,
   camera: CameraNode,
   lighting: LightingNode,
+  audio: AudioNode,
 };
 
 const edgeTypes: EdgeTypes = {
   tagged: TaggedEdge,
 };
 
-export function NovaCanvas() {
+interface NovaCanvasProps {
+  updateCursor?: (position: { x: number; y: number }) => void;
+}
+
+export function NovaCanvas({ updateCursor }: NovaCanvasProps) {
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const edgeReconnectSuccessful = useRef(true);
   const {
@@ -63,8 +70,31 @@ export function NovaCanvas() {
     onEdgesChange,
     addEdge: addStoreEdge,
     removeEdge,
+    addNode,
   } = useCanvasStore();
-  const { openFileRoleModal } = useModalStore();
+  const { characters, scenes } = useAssetStore();
+  const { openFileRoleModal, openBoardLoadModal } = useModalStore();
+  const { screenToFlowPosition } = useReactFlow();
+  const { applyAudio } = useAudioLoader();
+  const activeHashtagFilters = useProjectStore((s) => s.activeHashtagFilters);
+
+  // Apply hashtag filter dimming to nodes
+  const filteredNodes = useMemo(() => {
+    if (activeHashtagFilters.length === 0) return nodes;
+    return nodes.map((node) => {
+      const nodeTags = node.data.hashtags || [];
+      const matches = activeHashtagFilters.some((filter) =>
+        (nodeTags as string[]).includes(filter)
+      );
+      if (!matches) {
+        return {
+          ...node,
+          className: `${node.className || ''} opacity-20 pointer-events-none`.trim(),
+        };
+      }
+      return node;
+    }) as NovaNode[];
+  }, [nodes, activeHashtagFilters]);
 
   const onConnect = useCallback(
     (connection: Connection) => {
@@ -111,6 +141,9 @@ export function NovaCanvas() {
             case 'lighting':
               edgeColor = '#FBBF24';
               break;
+            case 'audio':
+              edgeColor = '#A855F7';
+              break;
           }
         }
       }
@@ -140,18 +173,6 @@ export function NovaCanvas() {
     (event: React.DragEvent) => {
       event.preventDefault();
 
-      const files = Array.from(event.dataTransfer.files);
-      if (files.length === 0) return;
-
-      const file = files[0];
-      const isImage = isImageFile(file);
-      const isVideo = isVideoFile(file);
-
-      if (!isImage && !isVideo) {
-        console.warn('Unsupported file type:', file.type);
-        return;
-      }
-
       // Get drop position relative to the canvas
       const bounds = reactFlowWrapper.current?.getBoundingClientRect();
       if (!bounds) return;
@@ -161,10 +182,130 @@ export function NovaCanvas() {
         y: event.clientY - bounds.top,
       };
 
+      // Check for asset drag data first
+      const assetData = event.dataTransfer.getData('application/nova-asset');
+      if (assetData) {
+        try {
+          const { type, id } = JSON.parse(assetData) as AssetDragData;
+
+          if (type === 'board') {
+            // Find the board to get its name
+            const { boards } = useAssetStore.getState();
+            const board = boards.find((b) => b.id === id);
+            if (board) {
+              openBoardLoadModal(id, board.name);
+            }
+            return;
+          }
+
+          if (type === 'character') {
+            // Create ElementNode from saved character
+            const character = characters.find((c) => c.id === id);
+            if (character) {
+              const nodeId = `element-${nanoid()}`;
+              const tagIndex = nodes.filter((n) => n.type === 'element').length + 1;
+              const tagAssignment = `@Element${tagIndex}`;
+
+              const newNode: NovaNode = {
+                id: nodeId,
+                type: 'element',
+                position: dropPosition,
+                data: {
+                  id: nodeId,
+                  name: character.name,
+                  elementType: character.elementType,
+                  frontalImageUrl: character.frontalImageUrl,
+                  frontalThumbnail: character.frontalThumbnail,
+                  referenceImageUrls: character.referenceImageUrls,
+                  referenceThumbnails: character.referenceThumbnails,
+                  tagAssignment,
+                  isHighlighted: false,
+                  frontalRemoteUrl: character.frontalImageUrl,
+                  frontalUploadStatus: 'completed',
+                  referenceRemoteUrls: character.referenceImageUrls,
+                  referenceUploadStatus: 'completed',
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                },
+              };
+
+              addNode(newNode);
+            }
+            return;
+          }
+
+          if (type === 'scene') {
+            // Create ImageNode from saved scene
+            const scene = scenes.find((s) => s.id === id);
+            if (scene) {
+              const nodeId = `image-${nanoid()}`;
+              const tagIndex = nodes.filter((n) => n.type === 'image').length + 1;
+              const tagAssignment = `@Image${tagIndex}`;
+
+              const newNode: NovaNode = {
+                id: nodeId,
+                type: 'image',
+                position: dropPosition,
+                data: {
+                  id: nodeId,
+                  imageUrl: scene.imageUrl,
+                  thumbnailUrl: scene.thumbnailUrl,
+                  fileName: scene.name,
+                  fileSize: 0,
+                  dimensions: { width: 0, height: 0 },
+                  role: 'reference',
+                  tagAssignment,
+                  isHighlighted: false,
+                  remoteUrl: scene.imageUrl,
+                  uploadStatus: 'completed',
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                },
+              };
+
+              addNode(newNode);
+            }
+            return;
+          }
+        } catch (e) {
+          console.error('Failed to parse asset drag data:', e);
+        }
+      }
+
+      // Handle file drops
+      const files = Array.from(event.dataTransfer.files);
+      if (files.length === 0) return;
+
+      const file = files[0];
+
+      // Audio: validate first (format, size, 2–20 s), then create a ready Audio node at the drop point
+      if (isAudioFile(file)) {
+        const clientPoint = { x: event.clientX, y: event.clientY };
+        void (async () => {
+          const result = await validateAudioFile(file);
+          if (typeof result === 'string') {
+            toast.error(result);
+            return;
+          }
+          const audioNode = createNode('audio', screenToFlowPosition(clientPoint), {});
+          addNode(audioNode);
+          applyAudio(audioNode.id, result);
+        })();
+        return;
+      }
+
+      const isImage = isImageFile(file);
+      const isVideo = isVideoFile(file);
+
+      if (!isImage && !isVideo) {
+        toast.error(`Unsupported file. Drop an image, a video, or audio (${AUDIO_FORMATS_LABEL}).`);
+        return;
+      }
+
       // Open role selection modal
       openFileRoleModal(file, isImage ? 'image' : 'video', dropPosition);
     },
-    [openFileRoleModal]
+    [openFileRoleModal, openBoardLoadModal, characters, scenes, nodes, addNode, screenToFlowPosition, applyAudio]
   );
 
   // Edge reconnection handlers - allows disconnecting by dragging from handle
@@ -219,6 +360,9 @@ export function NovaCanvas() {
             case 'lighting':
               edgeColor = '#FBBF24';
               break;
+            case 'audio':
+              edgeColor = '#A855F7';
+              break;
           }
         }
       }
@@ -266,6 +410,8 @@ export function NovaCanvas() {
         return '#F59E0B';
       case 'lighting':
         return '#FBBF24';
+      case 'audio':
+        return '#A855F7';
       default:
         return '#525252';
     }
@@ -280,10 +426,38 @@ export function NovaCanvas() {
     []
   );
 
+  // Handle cursor position updates for collaboration
+  const handleMouseMove = useCallback(
+    (event: React.MouseEvent) => {
+      if (!updateCursor) return;
+
+      // Get canvas-relative coordinates
+      const bounds = reactFlowWrapper.current?.getBoundingClientRect();
+      if (!bounds) return;
+
+      const x = event.clientX - bounds.left;
+      const y = event.clientY - bounds.top;
+
+      updateCursor({ x, y });
+    },
+    [updateCursor]
+  );
+
+  const handleMouseLeave = useCallback(() => {
+    if (!updateCursor) return;
+    // Hide cursor when leaving canvas
+    updateCursor({ x: -1, y: -1 });
+  }, [updateCursor]);
+
   return (
-    <div ref={reactFlowWrapper} className="h-full w-full">
+    <div
+      ref={reactFlowWrapper}
+      className="h-full w-full"
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
+    >
       <ReactFlow
-        nodes={nodes as unknown as Node[]}
+        nodes={filteredNodes as unknown as Node[]}
         edges={edges as unknown as Edge[]}
         onNodesChange={onNodesChange as unknown as (changes: unknown[]) => void}
         onEdgesChange={onEdgesChange as unknown as (changes: unknown[]) => void}
@@ -297,11 +471,15 @@ export function NovaCanvas() {
         edgeTypes={edgeTypes}
         defaultEdgeOptions={defaultEdgeOptions}
         fitView
+        fitViewOptions={{
+          padding: 0.4,
+          maxZoom: 0.85,
+        }}
         snapToGrid
         snapGrid={[16, 16]}
         minZoom={0.1}
         maxZoom={2}
-        defaultViewport={{ x: 0, y: 0, zoom: 1 }}
+        defaultViewport={{ x: 0, y: 0, zoom: 0.75 }}
         proOptions={{ hideAttribution: true }}
         connectionLineStyle={{ stroke: '#525252', strokeWidth: 2 }}
       >

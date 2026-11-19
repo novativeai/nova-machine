@@ -6,6 +6,7 @@ import { Camera, X } from 'lucide-react';
 import type { CameraNodeData, CameraAngle, LensLength, Colorimetry } from '@/types';
 import { useCanvasStore } from '@/stores';
 import { cn } from '@/lib/utils';
+import { HashtagBadges } from './HashtagBadges';
 
 interface CameraNodeProps {
   id: string;
@@ -195,6 +196,8 @@ function CameraNodeComponent({ id, data, selected }: CameraNodeProps) {
           )}
         </div>
       )}
+
+      <HashtagBadges nodeId={id} />
 
       {/* Output Handle - connects to prompt node */}
       <Handle type="source" position={Position.Right} id="output" />

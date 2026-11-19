@@ -1,7 +1,23 @@
 @import 'tailwindcss';
 
 @theme {
-  /* Color Tokens */
+  /* Typography */
+  --font-jetbrains: var(--font-jetbrains), 'JetBrains Mono', monospace;
+  --letter-spacing-tight: -0.05em;
+  /* Refined Landing Page Colors - Subtle & Sophisticated */
+  --color-landing-bg-primary: #0f1117;      /* Deep charcoal */
+  --color-landing-bg-secondary: #1a1d29;    /* Subtle navy tint */
+  --color-landing-bg-tertiary: #252935;     /* Card backgrounds */
+  --color-landing-accent: #3b82f6;          /* Refined blue accent */
+  --color-landing-accent-muted: #60a5fa;    /* Lighter blue */
+  --color-landing-accent-subtle: #1d4ed8;   /* Deeper blue */
+  --color-landing-text-primary: #f8fafc;    /* Clean white */
+  --color-landing-text-secondary: #cbd5e1;  /* Muted text */
+  --color-landing-text-dim: #64748b;        /* Dimmed text */
+  --color-landing-border: rgba(255, 255, 255, 0.08);
+  --color-landing-border-hover: rgba(255, 255, 255, 0.15);
+
+  /* Canvas/App Colors (Existing) */
   --color-background: #0A0A0A;
   --color-foreground: #FAFAFA;
   --color-card: #171717;
@@ -41,6 +57,29 @@
 
 * {
   border-color: var(--color-border);
+}
+
+/* Big Titles - JetBrains Mono with tight letter spacing */
+.title-display {
+  font-family: var(--font-jetbrains);
+  letter-spacing: -0.05em;
+}
+
+h1, .h1,
+h2, .h2 {
+  font-family: var(--font-jetbrains);
+  letter-spacing: -0.05em;
+}
+
+/* Numbers - JetBrains Mono for tabular/display numbers */
+.font-mono-num,
+[data-stat],
+.stat-value,
+.counter,
+.price,
+.number {
+  font-family: var(--font-jetbrains);
+  font-variant-numeric: tabular-nums;
 }
 
 body {
@@ -335,6 +374,18 @@ body {
   animation: shimmer 1.5s infinite;
 }
 
+/* Character generation loading shimmer */
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(6, 182, 212, 0.1) 0%,
+    rgba(6, 182, 212, 0.3) 50%,
+    rgba(6, 182, 212, 0.1) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+}
+
 /* Custom Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
@@ -493,4 +544,93 @@ body {
   z-index: 50;
   pointer-events: none;
   white-space: nowrap;
+}
+
+/* Landing Page Animations */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scroll {
+  0% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(8px);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fade-up 0.8s ease-out;
+}
+
+.animate-scroll {
+  animation: scroll 1.5s ease-in-out infinite;
+}
+
+/* Smooth Scroll */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Video Optimization */
+video {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Prevent text selection on video overlays */
+.video-overlay {
+  user-select: none;
+}
+
+/* Showcase Marquee Animations - Seamless infinite vertical scroll */
+@keyframes marquee-up {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(-50%);
+  }
+}
+
+@keyframes marquee-down {
+  0% {
+    transform: translateY(-50%);
+  }
+  100% {
+    transform: translateY(0);
+  }
+}
+
+.animate-marquee-up {
+  animation: marquee-up linear infinite;
+}
+
+.animate-marquee-down {
+  animation: marquee-down linear infinite;
+}
+
+/* Tailwind Utilities for JetBrains Mono */
+@utility font-jetbrains {
+  font-family: var(--font-jetbrains);
+}
+
+@utility tracking-display {
+  letter-spacing: -0.05em;
+}
+
+@utility font-mono-num {
+  font-family: var(--font-jetbrains);
+  font-variant-numeric: tabular-nums;
 }

@@ -6,6 +6,7 @@ import { Sun, X } from 'lucide-react';
 import type { LightingNodeData, LightingStyle, LightingKey } from '@/types';
 import { useCanvasStore } from '@/stores';
 import { cn } from '@/lib/utils';
+import { HashtagBadges } from './HashtagBadges';
 
 interface LightingNodeProps {
   id: string;
@@ -152,6 +153,8 @@ function LightingNodeComponent({ id, data, selected }: LightingNodeProps) {
           )}
         </div>
       )}
+
+      <HashtagBadges nodeId={id} />
 
       {/* Output Handle - connects to prompt node */}
       <Handle type="source" position={Position.Right} id="output" />

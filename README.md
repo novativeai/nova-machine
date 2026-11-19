@@ -1,138 +1,51 @@
-# NovaMachine
+# Nova Machine
 
-A node-based AI Video Generator powered by KLing O1 models via fal.ai.
+A node-based canvas for AI video, image and audio-to-video generation. Wire prompts, images, characters, videos and audio together and generate with the best current fal.ai models.
 
-## Features
+## Bring your own fal.ai key
 
-- **Infinite Canvas**: Visual node-based workflow using React Flow
-- **Multiple AI Models**: Automatic model selection based on inputs
-  - Image-to-Video: Animate images with text guidance
-  - Reference-to-Video: Generate with character/style references
-  - Video-to-Video Edit: Transform videos with natural language
-  - Video-to-Video Reference: Create new shots from reference videos
-- **Tag System**: Visual @Image, @Element, @Video tags with color-coded highlighting
-- **Drag & Drop**: Easy file import with role selection
-- **Video Chaining**: Use outputs as inputs for iterative generation
+Nova Machine runs on **your own fal.ai account**. Each user adds their fal.ai API key in the app (the key button in the header); fal.ai bills them directly for what they generate.
 
-## Getting Started
+How the key is protected:
 
-### Prerequisites
+- **Stays in the browser.** The key is saved in that browser's local storage only. It is never sent to or stored on Nova Machine's servers or Firestore.
+- **Sent only to fal.ai.** Generation requests and uploads go directly from the browser to fal.ai over HTTPS. No server route receives or proxies the key.
+- **Never shared.** Collaborators on a shared board use their own keys.
+- **Revocable.** Users can remove it in the app at any time or revoke it from [fal.ai/dashboard/keys](https://fal.ai/dashboard/keys). A dedicated key per app is recommended.
 
-- Node.js 18+
-- pnpm (recommended) or npm
-- fal.ai API key
+## Models
 
-### Installation
+| Use | fal.ai endpoint |
+|-----|-----------------|
+| Text / image / reference to video | `bytedance/seedance-2.5/us/*` |
+| Audio to video (2–20 s audio) | `lightricks/ltx-2.5/audio-to-video/{pro,fast}` |
+| Images, edits, characters, scenes | `openai/gpt-image-2.6/sunburst/*` |
+
+## Tech stack
+
+| Layer | Technology |
+|-------|------------|
+| Frontend | Next.js 16, React 19, TypeScript, Tailwind CSS 4 |
+| Auth & data | Firebase Auth, Firestore |
+| Media storage | Cloudflare R2 |
+| AI generation | fal.ai (user's own key) |
+| AI assistant | Anthropic Claude (command bar, moodboards) |
+| State | Zustand |
+
+## Setup
 
 ```bash
-# Clone the repository
-git clone <repo-url>
-cd nova-machine
-
-# Install dependencies
 pnpm install
-
-# Set up environment variables
-cp .env.example .env.local
-# Edit .env.local and add your FAL_KEY
-
-# Start development server
+cp .env.example .env.local   # Firebase, Resend, Anthropic, admin secret; add R2_* for media storage
 pnpm dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) to use NovaMachine.
+No fal.ai key is needed on the server.
 
-## Usage
-
-### Basic Workflow
-
-1. **Add a Prompt Node**: Click "Prompt" in the sidebar or drag from panel
-2. **Add Media Nodes**: Drag & drop images/videos onto the canvas
-3. **Select Role**: Choose how to use the media (@Image, @Element, @Video, etc.)
-4. **Connect Nodes**: Drag from node handles to connect inputs to prompt
-5. **Write Prompt**: Use tags like `@Image1`, `@Element1` to reference connected nodes
-6. **Generate**: Click "Generate Video" to create your video
-
-### Tag System
-
-| Tag | Color | Usage |
-|-----|-------|-------|
-| `@Image1`, `@Image2`... | Blue | Reference images for style/composition |
-| `@Element1`, `@Element2`... | Red | Character or object definitions |
-| `@Video1` | Purple | Reference video for motion/style |
-
-### Model Selection
-
-The system automatically selects the appropriate model:
-
-- **Video input** → Video-to-Video (Edit or Reference)
-- **Element nodes** → Reference-to-Video
-- **@Image tags** → Reference-to-Video
-- **Start/End frames** → Image-to-Video
-
-## Project Structure
-
-```
-nova-machine/
-├── app/                    # Next.js App Router
-│   ├── page.tsx           # Main canvas page
-│   └── globals.css        # Global styles
-├── components/
-│   ├── canvas/            # React Flow canvas
-│   ├── nodes/             # Custom node components
-│   ├── modals/            # Modal dialogs
-│   ├── sidebar/           # Node palette
-│   └── layout/            # Layout components
-├── lib/
-│   └── fal/               # fal.ai integration
-├── stores/                # Zustand stores
-├── hooks/                 # React hooks
-├── types/                 # TypeScript types
-└── docs/                  # Documentation
-```
-
-## Technology Stack
-
-- **Next.js 15** with App Router
-- **React 19** with TypeScript
-- **React Flow** for node-based UI
-- **Zustand** for state management
-- **Tailwind CSS 4** for styling
-- **fal.ai SDK** for AI generation
-
-## API Pricing
-
-| Model | Price |
-|-------|-------|
-| Image-to-Video | $0.112/sec |
-| Reference-to-Video | $0.112/sec |
-| Video-to-Video Edit | $0.168/sec |
-| Video-to-Video Reference | $0.168/sec |
-
-## Development
+Deploy the Firestore rules whenever `firestore.rules` changes:
 
 ```bash
-# Run development server
-pnpm dev
-
-# Type check
-pnpm typecheck
-
-# Build for production
-pnpm build
-
-# Start production server
-pnpm start
+firebase deploy --only firestore:rules
 ```
 
-## Documentation
-
-See [docs/PROJECT_DOCUMENTATION.md](docs/PROJECT_DOCUMENTATION.md) for detailed documentation including:
-- Complete API reference
-- System architecture
-- Type definitions
-- Implementation details
-
-## License
-
-MIT
+See [SETUP.md](SETUP.md) for Firebase details and [docs/PROJECT_DOCUMENTATION.md](docs/PROJECT_DOCUMENTATION.md) for the canvas architecture.

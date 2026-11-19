@@ -1,0 +1,438 @@
+'use client';
+
+import { useRef, useState, useMemo } from 'react';
+import { motion, useInView, AnimatePresence } from 'framer-motion';
+import Link from 'next/link';
+import { VIDEO_CATALOG, CATEGORIES, ALL_TAGS, type VideoItem } from '@/lib/video-catalog';
+
+// ============================================================================
+// MASONRY LAYOUT SYSTEM - Pinterest-style dynamic grid
+// ============================================================================
+
+// Seeded random number generator for consistent randomization
+function seededRandom(seed: number) {
+  const x = Math.sin(seed) * 10000;
+  return x - Math.floor(x);
+}
+
+// Shuffle array with seed for reproducibility
+function shuffleWithSeed<T>(array: T[], seed: number): T[] {
+  const result = [...array];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(seededRandom(seed + i) * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
+// Actual video dimensions from the catalog:
+// - Landscape: 1920x1080 (16:9) → aspect-ratio: 16/9 = 1.778
+// - Portrait: 1080x1920 (9:16) → aspect-ratio: 9/16 = 0.5625
+// - Square: 1440x1440 (1:1) → aspect-ratio: 1/1 = 1.0
+
+// Grid configuration that preserves aspect ratios (no cropping)
+// Using 10px base row for fine-grained control
+const _getGridConfig = (
+  aspect: VideoItem['aspect'],
+  index: number,
+  isFeatured?: boolean,
+  randomSeed?: number
+) => {
+  // Use randomSeed to vary placement
+  const rand = randomSeed ?? index;
+
+  switch (aspect) {
+    case 'portrait':
+      // Portrait 9:16 - always 1 column, tall
+      // For 1 col width, need ~1.78x height ratio
+      // With 10px rows and ~300px col width, that's ~53 rows
+      // But we want variety, so 45-55 range
+      return {
+        colSpan: 1,
+        rowSpan: 45 + (rand % 3) * 4, // 45, 49, 53
+        aspectRatio: '9 / 16',
+      };
+    case 'landscape':
+      // Landscape 16:9 - can span 1 or 2 columns
+      // Mix it up: ~60% span 2 cols, ~40% span 1 col
+      const spanTwo = isFeatured || (rand % 5 > 1); // 60% chance for 2 cols
+      if (spanTwo) {
+        // 2 columns wide: aspect 32:9, need shorter height
+        // ~28% height ratio → ~25-30 rows
+        return {
+          colSpan: 2,
+          rowSpan: 22 + (rand % 3) * 2, // 22, 24, 26
+          aspectRatio: '16 / 9',
+        };
+      } else {
+        // 1 column: aspect 16:9
+        // ~56% height ratio → ~28-32 rows
+        return {
+          colSpan: 1,
+          rowSpan: 26 + (rand % 3) * 2, // 26, 28, 30
+          aspectRatio: '16 / 9',
+        };
+      }
+    case 'square':
+      // Square 1:1 - always 1 column
+      // Equal width/height → ~30-35 rows
+      return {
+        colSpan: 1,
+        rowSpan: 30 + (rand % 2) * 3, // 30, 33
+        aspectRatio: '1 / 1',
+      };
+    default:
+      return { colSpan: 1, rowSpan: 28, aspectRatio: '16 / 9' };
+  }
+};
+
+export default function GalleryPage() {
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [selectedTag, setSelectedTag] = useState<string | null>(null);
+  const [selectedVideo, setSelectedVideo] = useState<VideoItem | null>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
+  const isHeaderInView = useInView(headerRef, { once: true });
+
+  const filteredItems = VIDEO_CATALOG.filter(item => {
+    const categoryMatch = selectedCategory === 'All' || item.category === selectedCategory;
+    const tagMatch = !selectedTag || item.tags.includes(selectedTag);
+    return categoryMatch && tagMatch;
+  });
+
+  // Shuffle items for masonry layout - memoized for performance
+  const shuffledItems = useMemo(() => {
+    const seed = selectedCategory.length + (selectedTag?.length || 0) + 42;
+    return shuffleWithSeed(filteredItems, seed);
+  }, [filteredItems, selectedCategory, selectedTag]);
+
+  const clearFilters = () => {
+    setSelectedCategory('All');
+    setSelectedTag(null);
+  };
+
+  return (
+    <div className="min-h-screen bg-[#0a0a0a]">
+      {/* Hero Header */}
+      <div ref={headerRef} className="relative overflow-hidden pb-16 pt-32">
+        {/* Background glow */}
+        <div className="pointer-events-none absolute inset-0">
+          <div className="absolute left-1/2 top-1/2 h-[600px] w-[600px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-white/[0.02] blur-3xl" />
+        </div>
+
+        <div className="relative mx-auto max-w-7xl px-6">
+          <motion.div
+            initial={{ opacity: 0, y: 40 }}
+            animate={isHeaderInView ? { opacity: 1, y: 0 } : {}}
+            transition={{ duration: 0.8 }}
+            className="text-center"
+          >
+            <h1 className="text-5xl font-semibold tracking-tight text-white md:text-6xl lg:text-7xl">
+              The Gallery
+            </h1>
+            <p className="mx-auto mt-6 max-w-2xl text-lg text-white/50">
+              Explore what creators are building with Nova Machine.
+              Every video here was generated by AI.
+            </p>
+            <p className="mt-4 text-sm text-white/30">
+              {VIDEO_CATALOG.length} videos • {CATEGORIES.length - 1} categories • {ALL_TAGS.length} tags
+            </p>
+          </motion.div>
+
+          {/* Category Filter */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={isHeaderInView ? { opacity: 1, y: 0 } : {}}
+            transition={{ duration: 0.8, delay: 0.2 }}
+            className="mt-12 flex flex-wrap justify-center gap-2"
+          >
+            {CATEGORIES.map((category) => (
+              <button
+                key={category}
+                onClick={() => setSelectedCategory(category)}
+                className={`rounded-full px-5 py-2 text-sm font-medium transition-all ${
+                  selectedCategory === category
+                    ? 'bg-white text-black'
+                    : 'border border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white'
+                }`}
+              >
+                {category}
+              </button>
+            ))}
+          </motion.div>
+
+          {/* Tag Filter (if category selected) */}
+          {selectedCategory !== 'All' && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mt-6 flex flex-wrap justify-center gap-2"
+            >
+              {[...new Set(VIDEO_CATALOG.filter(v => v.category === selectedCategory).flatMap(v => v.tags))].slice(0, 10).map((tag) => (
+                <button
+                  key={tag}
+                  onClick={() => setSelectedTag(selectedTag === tag ? null : tag)}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                    selectedTag === tag
+                      ? 'bg-white/20 text-white'
+                      : 'border border-white/5 bg-white/[0.02] text-white/40 hover:bg-white/5 hover:text-white/60'
+                  }`}
+                >
+                  #{tag}
+                </button>
+              ))}
+              {selectedTag && (
+                <button
+                  onClick={clearFilters}
+                  className="rounded-full px-3 py-1 text-xs text-white/30 hover:text-white"
+                >
+                  Clear filters
+                </button>
+              )}
+            </motion.div>
+          )}
+        </div>
+      </div>
+
+      {/* Masonry Gallery - CSS Columns for true masonry effect */}
+      <div className="mx-auto max-w-[1800px] px-4 pb-32">
+        {/*
+          True masonry using CSS columns:
+          - 3 columns on desktop, 2 on tablet/mobile
+          - Items flow top-to-bottom, then left-to-right
+          - No gaps between items of different heights
+        */}
+        <div
+          className="columns-2 gap-3 lg:columns-3"
+          style={{ columnFill: 'balance' }}
+        >
+          <AnimatePresence mode="popLayout">
+            {shuffledItems.map((item, index) => {
+              // Generate unique random seed per item for varied placement
+              const randomSeed = Math.floor(seededRandom(index * 7 + item.id.length) * 100);
+              return (
+                <MasonryCard
+                  key={item.id}
+                  item={item}
+                  index={index}
+                  randomSeed={randomSeed}
+                  onClick={() => setSelectedVideo(item)}
+                />
+              );
+            })}
+          </AnimatePresence>
+        </div>
+
+        {filteredItems.length === 0 && (
+          <div className="py-20 text-center">
+            <p className="text-white/40">No videos match your filters.</p>
+            <button
+              onClick={clearFilters}
+              className="mt-4 text-sm text-white/60 hover:text-white"
+            >
+              Clear all filters
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* CTA Section */}
+      <section className="border-t border-white/5 bg-[#050505] py-24">
+        <div className="mx-auto max-w-4xl px-6 text-center">
+          <h2 className="text-3xl font-semibold text-white md:text-4xl">
+            Ready to create your own?
+          </h2>
+          <p className="mx-auto mt-4 max-w-xl text-white/50">
+            Join thousands of creators using Nova Machine
+          </p>
+          <Link
+            href="/sign-up"
+            className="mt-8 inline-block rounded-full bg-white px-8 py-3.5 text-sm font-medium text-black transition-all hover:opacity-90"
+          >
+            Start Creating
+          </Link>
+        </div>
+      </section>
+
+      {/* Lightbox Modal */}
+      <AnimatePresence>
+        {selectedVideo && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/95 p-4 backdrop-blur-sm"
+            onClick={() => setSelectedVideo(null)}
+          >
+            <button
+              onClick={() => setSelectedVideo(null)}
+              className="absolute right-6 top-6 text-sm text-white/60 transition-colors hover:text-white"
+            >
+              Close
+            </button>
+
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="relative w-full max-w-5xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className={`overflow-hidden rounded-xl ${
+                selectedVideo.aspect === 'portrait' ? 'mx-auto max-w-md' :
+                selectedVideo.aspect === 'square' ? 'mx-auto max-w-2xl' :
+                'w-full'
+              }`}>
+                <video
+                  src={selectedVideo.video}
+                  poster={selectedVideo.poster}
+                  autoPlay
+                  loop
+                  controls
+                  playsInline
+                  className="h-full w-full"
+                />
+              </div>
+
+              <div className="mt-6 text-center">
+                <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/50">
+                  {selectedVideo.category}
+                </span>
+                <h3 className="mt-3 text-2xl font-semibold text-white">
+                  {selectedVideo.title}
+                </h3>
+                <p className="mt-1 text-white/50">
+                  by {selectedVideo.creator}
+                </p>
+
+                {/* Tags */}
+                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                  {selectedVideo.tags.map(tag => (
+                    <span
+                      key={tag}
+                      className="rounded-full bg-white/5 px-2 py-0.5 text-xs text-white/40"
+                    >
+                      #{tag}
+                    </span>
+                  ))}
+                </div>
+
+                {/* Use Case */}
+                <p className="mt-4 text-sm text-white/30">
+                  {selectedVideo.useCase}
+                </p>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+    </div>
+  );
+}
+
+// ============================================================================
+// MASONRY CARD COMPONENT - Individual video with dynamic grid spanning
+// ============================================================================
+
+function MasonryCard({
+  item,
+  index,
+  onClick,
+}: {
+  item: VideoItem;
+  index: number;
+  onClick: () => void;
+  randomSeed?: number; // Optional, not needed for columns layout
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
+  const isInView = useInView(cardRef, { once: true, margin: '-50px' });
+
+  // Get correct aspect ratio for the video type
+  const getAspectRatio = () => {
+    switch (item.aspect) {
+      case 'portrait': return '9 / 16';  // Tall
+      case 'landscape': return '16 / 9'; // Wide
+      case 'square': return '1 / 1';     // Square
+      default: return '16 / 9';
+    }
+  };
+
+  const handleMouseEnter = () => {
+    videoRef.current?.play().catch(() => {});
+  };
+
+  const handleMouseLeave = () => {
+    if (videoRef.current) {
+      videoRef.current.pause();
+      videoRef.current.currentTime = 0;
+    }
+  };
+
+  return (
+    <motion.div
+      ref={cardRef}
+      initial={{ opacity: 0, y: 20 }}
+      animate={isInView ? { opacity: 1, y: 0 } : {}}
+      exit={{ opacity: 0, y: 20 }}
+      transition={{ duration: 0.5, delay: Math.min(index * 0.02, 0.3) }}
+      className="group relative mb-3 cursor-pointer overflow-hidden rounded-xl bg-neutral-900"
+      style={{
+        aspectRatio: getAspectRatio(),
+        breakInside: 'avoid', // Prevent card from breaking across columns
+      }}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+      onClick={onClick}
+    >
+      {/* Video - fills container with exact aspect ratio (no cropping) */}
+      <video
+        ref={videoRef}
+        src={item.video}
+        poster={item.poster}
+        loop
+        muted
+        playsInline
+        className="absolute inset-0 h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+      />
+
+      {/* Gradient overlay - subtle by default, stronger on hover */}
+      <div className="absolute inset-0 bg-linear-to-t from-black/80 via-black/20 to-transparent opacity-60 transition-opacity duration-300 group-hover:opacity-100" />
+
+      {/* Content - revealed on hover */}
+      <div className="absolute bottom-0 left-0 right-0 p-4">
+        <div className="translate-y-2 transform opacity-0 transition-all duration-300 group-hover:translate-y-0 group-hover:opacity-100">
+          <span className="text-[10px] uppercase tracking-wider text-white/50">
+            {item.category}
+          </span>
+          <h3 className="mt-1 text-sm font-medium leading-tight text-white md:text-base">
+            {item.title}
+          </h3>
+          <p className="text-xs text-white/50">
+            by {item.creator}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {item.tags.slice(0, 3).map(tag => (
+              <span
+                key={tag}
+                className="rounded bg-white/10 px-1.5 py-0.5 text-[9px] text-white/40"
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Border glow on hover */}
+      <div className="absolute inset-0 rounded-xl border border-white/0 transition-colors duration-300 group-hover:border-white/20" />
+
+      {/* Featured badge */}
+      {item.featured && (
+        <div className="absolute left-3 top-3 rounded-full bg-white/10 px-2 py-0.5 text-[10px] font-medium text-white backdrop-blur-sm">
+          Featured
+        </div>
+      )}
+    </motion.div>
+  );
+}

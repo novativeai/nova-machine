@@ -36,3 +36,12 @@ next-env.d.ts
 
 # Playwright MCP screenshots
 .playwright-mcp/
+
+/lib/generated/prisma
+
+# Service account keys (never commit)
+*firebase-key*.json
+*service-account*.json
+
+# Local-only archive of the retired billing code
+_archive/

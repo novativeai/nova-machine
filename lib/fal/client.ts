@@ -1,164 +1,105 @@
 import { fal } from '@fal-ai/client';
 import type {
-  KlingModel,
-  KlingInput,
-  KlingOutput,
-  KlingImageToVideoInput,
-  KlingReferenceToVideoInput,
-  KlingVideoToVideoEditInput,
-  KlingVideoToVideoReferenceInput,
-  NanoBananaModel,
-  NanoBananaInput,
-  NanoBananaOutput,
-  GenerationModel,
+  AudioToVideoModel,
   FalQueueUpdate,
+  ImageGenerationInput,
+  ImageGenerationOutput,
+  ImageModel,
+  LtxAudioToVideoInput,
+  LtxAudioToVideoOutput,
+  VideoGenerationInput,
+  VideoGenerationOutput,
+  VideoModel,
 } from '@/types';
+import { formatErrorForDisplay } from './errors';
+import { useSettingsStore } from '@/stores/settings-store';
 
-// Configure fal client to use proxy for client-side usage
-fal.config({
-  proxyUrl: '/api/fal/proxy',
-});
+/** Shown whenever an action needs fal.ai but no key is saved. */
+export const FAL_KEY_REQUIRED_MESSAGE =
+  'Add your fal.ai API key (the key icon in the header) to generate. It is stored only in this browser and sent only to fal.ai.';
 
-export interface GenerateVideoOptions {
-  model: KlingModel;
-  input: KlingInput;
-  onQueueUpdate?: (update: FalQueueUpdate) => void;
+/**
+ * Point the fal client at the user's own API key.
+ * Bring-your-own-key: every fal request goes directly from this browser to fal.ai —
+ * the key is never sent to Nova Machine's servers, so there is no server-side fallback key.
+ */
+export function ensureFalConfig(): void {
+  const userApiKey = useSettingsStore.getState().falApiKey;
+  if (!userApiKey) throw new Error(FAL_KEY_REQUIRED_MESSAGE);
+  fal.config({ credentials: userApiKey });
 }
 
-export interface GenerateVideoResult {
+export interface FalRunResult<TOutput> {
   success: boolean;
-  data?: KlingOutput;
+  data?: TOutput;
   requestId?: string;
   error?: string;
 }
 
 /**
- * Generate a video using the specified KLing model
+ * Submit to a fal queue endpoint and wait for the result.
  */
-export async function generateVideo(
-  options: GenerateVideoOptions
-): Promise<GenerateVideoResult> {
-  const { model, input, onQueueUpdate } = options;
-
-  // Log the full input being sent to fal.ai
-  console.log('[FAL Client] Sending to model:', model);
+export async function runFal<TInput extends object, TOutput>(
+  endpoint: string,
+  input: TInput,
+  onQueueUpdate?: (update: FalQueueUpdate) => void
+): Promise<FalRunResult<TOutput>> {
+  try {
+    ensureFalConfig();
+  } catch (error) {
+    return { success: false, error: error instanceof Error ? error.message : FAL_KEY_REQUIRED_MESSAGE };
+  }
+  console.log('[FAL Client] Sending to:', endpoint);
   console.log('[FAL Client] Input payload:', JSON.stringify(input, null, 2));
 
   try {
-    const result = await fal.subscribe(model, {
-      input,
+    const result = await fal.subscribe(endpoint, {
+      input: input as Record<string, unknown>,
       logs: true,
       onQueueUpdate: (update) => {
-        if (onQueueUpdate) {
-          onQueueUpdate({
-            status: update.status,
-            logs: 'logs' in update ? update.logs : undefined,
-          });
-        }
+        onQueueUpdate?.({
+          status: update.status,
+          logs: 'logs' in update ? update.logs : undefined,
+        });
       },
     });
 
     return {
       success: true,
-      data: result.data as KlingOutput,
+      data: result.data as TOutput,
       requestId: result.requestId,
     };
   } catch (error) {
-    console.error('Video generation failed:', error);
+    console.error(`[FAL Client] ${endpoint} failed:`, error);
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Unknown error occurred',
+      error: formatErrorForDisplay(error),
     };
   }
 }
 
-// ============================================================================
-// IMAGE GENERATION
-// ============================================================================
-
-export interface GenerateImageOptions {
-  model: NanoBananaModel;
-  input: NanoBananaInput;
+export function generateVideo(options: {
+  model: VideoModel;
+  input: VideoGenerationInput;
   onQueueUpdate?: (update: FalQueueUpdate) => void;
+}): Promise<FalRunResult<VideoGenerationOutput>> {
+  return runFal<VideoGenerationInput, VideoGenerationOutput>(options.model, options.input, options.onQueueUpdate);
 }
 
-export interface GenerateImageResult {
-  success: boolean;
-  data?: NanoBananaOutput;
-  requestId?: string;
-  error?: string;
+export function generateImage(options: {
+  model: ImageModel;
+  input: ImageGenerationInput;
+  onQueueUpdate?: (update: FalQueueUpdate) => void;
+}): Promise<FalRunResult<ImageGenerationOutput>> {
+  return runFal<ImageGenerationInput, ImageGenerationOutput>(options.model, options.input, options.onQueueUpdate);
 }
 
-/**
- * Generate an image using the specified Nano Banana Pro model
- */
-export async function generateImage(
-  options: GenerateImageOptions
-): Promise<GenerateImageResult> {
-  const { model, input, onQueueUpdate } = options;
-
-  // Log the full input being sent to fal.ai
-  console.log('[FAL Client] Sending to image model:', model);
-  console.log('[FAL Client] Image input payload:', JSON.stringify(input, null, 2));
-
-  try {
-    const result = await fal.subscribe(model, {
-      input,
-      logs: true,
-      onQueueUpdate: (update) => {
-        console.log('[FAL Client] Queue update:', JSON.stringify(update, null, 2));
-        if (onQueueUpdate) {
-          onQueueUpdate({
-            status: update.status,
-            logs: 'logs' in update ? update.logs : undefined,
-          });
-        }
-      },
-    });
-
-    console.log('[FAL Client] Image generation result:', JSON.stringify(result, null, 2));
-    return {
-      success: true,
-      data: result.data as NanoBananaOutput,
-      requestId: result.requestId,
-    };
-  } catch (error) {
-    console.error('[FAL Client] Image generation failed:', error);
-    // Log full error details for debugging
-    if (error && typeof error === 'object') {
-      console.error('[FAL Client] Error object keys:', Object.keys(error));
-      console.error('[FAL Client] Error details:', JSON.stringify(error, null, 2));
-      if ('body' in error) {
-        console.error('[FAL Client] Error body:', JSON.stringify((error as { body: unknown }).body, null, 2));
-      }
-      if ('status' in error) {
-        console.error('[FAL Client] Error status:', (error as { status: unknown }).status);
-      }
-      if ('message' in error) {
-        console.error('[FAL Client] Error message:', (error as { message: unknown }).message);
-      }
-    }
-
-    // Extract error message from various possible formats
-    let errorMessage = 'Unknown error occurred';
-    if (error instanceof Error) {
-      errorMessage = error.message;
-    } else if (error && typeof error === 'object') {
-      if ('message' in error && typeof (error as { message: string }).message === 'string') {
-        errorMessage = (error as { message: string }).message;
-      } else if ('body' in error) {
-        const body = (error as { body: unknown }).body;
-        if (body && typeof body === 'object' && 'detail' in body) {
-          errorMessage = String((body as { detail: unknown }).detail);
-        }
-      }
-    }
-
-    return {
-      success: false,
-      error: errorMessage,
-    };
-  }
+export function generateAudioToVideo(options: {
+  model: AudioToVideoModel;
+  input: LtxAudioToVideoInput;
+  onQueueUpdate?: (update: FalQueueUpdate) => void;
+}): Promise<FalRunResult<LtxAudioToVideoOutput>> {
+  return runFal<LtxAudioToVideoInput, LtxAudioToVideoOutput>(options.model, options.input, options.onQueueUpdate);
 }
 
 // ============================================================================
@@ -166,100 +107,43 @@ export async function generateImage(
 // ============================================================================
 
 /**
- * Upload a file to fal.ai storage via dedicated server-side upload route
- * This bypasses the proxy to handle large files
+ * Upload a file straight from the browser to fal.ai storage with the user's own key.
+ * (Used when a background upload didn't produce a URL.)
  */
 export async function uploadFile(file: File): Promise<string> {
-  console.log('[Upload] Starting upload for:', file.name, 'Size:', file.size);
-
-  const formData = new FormData();
-  formData.append('file', file);
-
-  const response = await fetch('/api/fal/upload', {
-    method: 'POST',
-    body: formData,
-  });
-
-  if (!response.ok) {
-    const error = await response.json();
-    throw new Error(error.error || 'Upload failed');
-  }
-
-  const { url } = await response.json();
-  console.log('[Upload] Upload complete:', url);
+  ensureFalConfig();
+  const url = await fal.storage.upload(file);
+  console.log('[Upload] Uploaded to fal.ai storage:', file.name);
   return url;
 }
 
-// ============================================================================
-// PRICING
-// ============================================================================
-
-/**
- * Video model pricing per second
- */
-export const VIDEO_MODEL_PRICING: Record<KlingModel, number> = {
-  'fal-ai/kling-video/o1/image-to-video': 0.112,
-  'fal-ai/kling-video/o1/reference-to-video': 0.112,
-  'fal-ai/kling-video/o1/video-to-video/edit': 0.168,
-  'fal-ai/kling-video/o1/video-to-video/reference': 0.168,
-};
-
-/**
- * Image model pricing per image (base rate for 1K, 4K is double)
- */
-export const IMAGE_MODEL_PRICING: Record<NanoBananaModel, { base: number; '4K': number }> = {
-  'fal-ai/nano-banana-pro': { base: 0.15, '4K': 0.30 },
-  'fal-ai/nano-banana-pro/edit': { base: 0.15, '4K': 0.30 },
-};
-
-// Legacy export for backward compatibility
-export const MODEL_PRICING = VIDEO_MODEL_PRICING;
-
-/**
- * Calculate estimated cost for video generation
- */
-export function calculateVideoCost(model: KlingModel, durationSeconds: number): number {
-  return VIDEO_MODEL_PRICING[model] * durationSeconds;
+/** Prompt for the side/back turnaround views used to build character elements. */
+export function characterViewPrompt(view: 'side' | 'back'): string {
+  return `${view === 'side' ? 'Side' : 'Back'} view of the same character, same style and appearance, same clothing and colors, full body, plain background`;
 }
 
 /**
- * Calculate estimated cost for image generation
+ * Generate side + back views of a character from one image with GPT Image 2.6 edit.
+ * Returns [sideUrl, backUrl]; throws on failure.
  */
-export function calculateImageCost(model: NanoBananaModel, resolution: '1K' | '2K' | '4K' = '1K'): number {
-  const pricing = IMAGE_MODEL_PRICING[model];
-  return resolution === '4K' ? pricing['4K'] : pricing.base;
-}
-
-/**
- * Calculate estimated cost for generation (legacy support)
- */
-export function calculateCost(model: KlingModel, durationSeconds: number): number {
-  return calculateVideoCost(model, durationSeconds);
-}
-
-/**
- * Type guards for input types
- */
-export function isImageToVideoInput(
-  input: KlingInput
-): input is KlingImageToVideoInput {
-  return 'start_image_url' in input;
-}
-
-export function isReferenceToVideoInput(
-  input: KlingInput
-): input is KlingReferenceToVideoInput {
-  return 'image_urls' in input || 'elements' in input;
-}
-
-export function isVideoToVideoEditInput(
-  input: KlingInput
-): input is KlingVideoToVideoEditInput {
-  return 'video_url' in input && !('duration' in input);
-}
-
-export function isVideoToVideoReferenceInput(
-  input: KlingInput
-): input is KlingVideoToVideoReferenceInput {
-  return 'video_url' in input && 'duration' in input;
+export async function generateCharacterViews(imageUrl: string): Promise<[string, string]> {
+  const run = (view: 'side' | 'back') =>
+    generateImage({
+      model: 'openai/gpt-image-2.6/sunburst/edit',
+      input: {
+        prompt: characterViewPrompt(view),
+        image_urls: [imageUrl],
+        image_size: 'auto',
+        quality: 'high',
+        num_images: 1,
+        output_format: 'png',
+      },
+    });
+  const [side, back] = await Promise.all([run('side'), run('back')]);
+  const sideUrl = side.data?.images[0]?.url;
+  const backUrl = back.data?.images[0]?.url;
+  if (!sideUrl || !backUrl) {
+    throw new Error(side.error || back.error || 'Failed to generate character views');
+  }
+  return [sideUrl, backUrl];
 }

@@ -1,0 +1,244 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============================================================================
+    // HELPER FUNCTIONS
+    // ============================================================================
+
+    // Check if user is authenticated
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Check if user matches the userId
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Check if the request is from the server (admin)
+    function isServerRequest() {
+      return request.auth.token.admin == true;
+    }
+
+    // Verify that admin status is not being modified client-side
+    function adminStatusNotModified() {
+      return !('isAdmin' in request.resource.data) ||
+             request.resource.data.isAdmin == resource.data.isAdmin;
+    }
+
+    // Check if user has access to a board
+    function hasBoardAccess(boardId) {
+      let board = get(/databases/$(database)/documents/boards/$(boardId));
+      return board.data.ownerId == request.auth.uid ||
+             board.data.userId == request.auth.uid ||
+             request.auth.uid in board.data.collaboratorIds;
+    }
+
+    // Check if user is board owner
+    function isBoardOwner(boardId) {
+      let board = get(/databases/$(database)/documents/boards/$(boardId));
+      return board.data.ownerId == request.auth.uid ||
+             board.data.userId == request.auth.uid;
+    }
+
+    // Check if user has editor role on board
+    function isBoardEditor(boardId) {
+      let collabId = boardId + '_' + request.auth.uid;
+      let collab = get(/databases/$(database)/documents/boards/$(boardId)/collaborators/$(collabId));
+      return collab.data.role == 'editor' || collab.data.role == 'owner';
+    }
+
+    // Check if board is public
+    function isBoardPublic(boardId) {
+      let board = get(/databases/$(database)/documents/boards/$(boardId));
+      return board.data.visibility == 'public' || board.data.isPublic == true;
+    }
+
+    // ============================================================================
+    // USERS COLLECTION
+    // ============================================================================
+
+    match /users/{userId} {
+      // Users can read their own document
+      allow read: if isOwner(userId);
+
+      // Users can create their own document during signup, but never as admin
+      allow create: if isOwner(userId) &&
+                       request.resource.data.uid == userId &&
+                       (!('isAdmin' in request.resource.data) || request.resource.data.isAdmin == false);
+
+      // Users can update their own document, but NOT their admin status
+      allow update: if isOwner(userId) && adminStatusNotModified();
+
+      // Server (admin SDK) can update any user document
+      allow update: if isServerRequest();
+
+      // No deletes allowed from client
+      allow delete: if false;
+    }
+
+    // ============================================================================
+    // BOARDS COLLECTION
+    // ============================================================================
+
+    match /boards/{boardId} {
+      // Read access:
+      // - Owner can always read
+      // - Collaborators can read if they're in collaboratorIds
+      // - Anyone can read if board is public
+      allow read: if isBoardOwner(boardId) ||
+                     request.auth.uid in resource.data.collaboratorIds ||
+                     isBoardPublic(boardId);
+
+      // Create: Any authenticated user can create a board
+      allow create: if isSignedIn() &&
+                       request.resource.data.userId == request.auth.uid &&
+                       request.resource.data.ownerId == request.auth.uid;
+
+      // Update:
+      // - Owner can update anything
+      // - Editors can update nodes, edges, and metadata (not ownership/visibility)
+      allow update: if isBoardOwner(boardId) ||
+                       (request.auth.uid in resource.data.collaboratorIds &&
+                        isBoardEditor(boardId) &&
+                        // Prevent editors from changing ownership or critical settings
+                        request.resource.data.ownerId == resource.data.ownerId &&
+                        request.resource.data.userId == resource.data.userId &&
+                        request.resource.data.visibility == resource.data.visibility);
+
+      // Delete: Only owner can delete
+      allow delete: if isBoardOwner(boardId);
+
+      // ============================================================================
+      // BOARD SUBCOLLECTIONS
+      // ============================================================================
+
+      // Nodes subcollection (if used separately from board document)
+      match /nodes/{nodeId} {
+        allow read: if isBoardOwner(boardId) ||
+                       request.auth.uid in get(/databases/$(database)/documents/boards/$(boardId)).data.collaboratorIds ||
+                       isBoardPublic(boardId);
+
+        allow write: if isBoardOwner(boardId) ||
+                        (request.auth.uid in get(/databases/$(database)/documents/boards/$(boardId)).data.collaboratorIds &&
+                         isBoardEditor(boardId));
+      }
+
+      // Edges subcollection (if used separately from board document)
+      match /edges/{edgeId} {
+        allow read: if isBoardOwner(boardId) ||
+                       request.auth.uid in get(/databases/$(database)/documents/boards/$(boardId)).data.collaboratorIds ||
+                       isBoardPublic(boardId);
+
+        allow write: if isBoardOwner(boardId) ||
+                        (request.auth.uid in get(/databases/$(database)/documents/boards/$(boardId)).data.collaboratorIds &&
+                         isBoardEditor(boardId));
+      }
+
+      // Collaborators subcollection
+      match /collaborators/{collabId} {
+        // Anyone with board access can read collaborators
+        allow read: if isBoardOwner(boardId) ||
+                       request.auth.uid in get(/databases/$(database)/documents/boards/$(boardId)).data.collaboratorIds;
+
+        // Only owner can add/remove collaborators
+        allow create, delete: if isBoardOwner(boardId);
+
+        // Update rules:
+        // - Owner can update anything
+        // - Users can only update their own presence fields (isOnline, cursorPosition, selectedNodeIds, lastActiveAt)
+        // - Users CANNOT change their own role
+        allow update: if isBoardOwner(boardId) ||
+                         (collabId == boardId + '_' + request.auth.uid &&
+                          // Only allow updating presence fields
+                          (!('role' in request.resource.data) || request.resource.data.role == resource.data.role) &&
+                          (!('userId' in request.resource.data) || request.resource.data.userId == resource.data.userId) &&
+                          (!('boardId' in request.resource.data) || request.resource.data.boardId == resource.data.boardId) &&
+                          (!('email' in request.resource.data) || request.resource.data.email == resource.data.email) &&
+                          (!('displayName' in request.resource.data) || request.resource.data.displayName == resource.data.displayName) &&
+                          (!('invitedBy' in request.resource.data) || request.resource.data.invitedBy == resource.data.invitedBy) &&
+                          (!('joinedAt' in request.resource.data) || request.resource.data.joinedAt == resource.data.joinedAt));
+      }
+    }
+
+    // ============================================================================
+    // BOARD INVITATIONS COLLECTION
+    // ============================================================================
+
+    match /boardInvitations/{invitationId} {
+      // Read access:
+      // - Invitee can read invitations sent to their email
+      // - Inviter can read invitations they created
+      // - Board owner can read all invitations for their board
+      allow read: if isSignedIn() && (
+                     resource.data.invitedEmail == request.auth.token.email ||
+                     resource.data.invitedBy == request.auth.uid ||
+                     isBoardOwner(resource.data.boardId)
+                  );
+
+      // Create: Only board owners can create invitations
+      allow create: if isSignedIn() &&
+                       isBoardOwner(request.resource.data.boardId) &&
+                       request.resource.data.invitedBy == request.auth.uid &&
+                       request.resource.data.status == 'pending';
+
+      // Update:
+      // - Owner can update anything (e.g., revoke)
+      // - Invitee can accept/decline their own invitations
+      allow update: if isBoardOwner(resource.data.boardId) ||
+                       (resource.data.invitedEmail == request.auth.token.email &&
+                        (request.resource.data.status == 'accepted' ||
+                         request.resource.data.status == 'declined'));
+
+      // Delete: Only board owner can delete
+      allow delete: if isBoardOwner(resource.data.boardId);
+    }
+
+    // ============================================================================
+    // GENERATIONS COLLECTION
+    // ============================================================================
+
+    match /generations/{generationId} {
+      // Users can only read their own generations
+      allow read: if isOwner(resource.data.userId);
+
+      // Users can create generations for themselves
+      allow create: if isSignedIn() &&
+                       request.resource.data.userId == request.auth.uid;
+
+      // Users can update their own generations (e.g., status updates)
+      allow update: if isOwner(resource.data.userId);
+
+      // Users can delete their own generations
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    // ============================================================================
+    // BOARD ACTIVITY COLLECTION
+    // ============================================================================
+
+    match /boardActivity/{activityId} {
+      // Users with board access can read activity
+      allow read: if hasBoardAccess(resource.data.boardId);
+
+      // Users with editor access can create activity logs
+      allow create: if isSignedIn() &&
+                       hasBoardAccess(request.resource.data.boardId) &&
+                       request.resource.data.userId == request.auth.uid;
+
+      // No updates or deletes
+      allow update, delete: if false;
+    }
+
+    // ============================================================================
+    // DEFAULT DENY
+    // ============================================================================
+
+    // Deny access to any other collections
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

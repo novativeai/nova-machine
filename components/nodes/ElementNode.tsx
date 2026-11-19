@@ -1,12 +1,13 @@
 'use client';
 
-import { memo, useState, useRef, useCallback } from 'react';
+import { memo, useState, useRef, useCallback, useMemo } from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { User, X, Plus, Upload, Box } from 'lucide-react';
+import { User, X, Plus, Upload, Box, AlertTriangle } from 'lucide-react';
 import type { ElementNodeData } from '@/types';
 import { useCanvasStore } from '@/stores';
 import { cn } from '@/lib/utils';
-import { getTagColor } from '@/lib/fal';
+import { getTagColor, isValidNameForTag, formatNameAsTag } from '@/lib/fal';
+import { HashtagBadges } from './HashtagBadges';
 
 interface ElementNodeProps {
   id: string;
@@ -15,7 +16,7 @@ interface ElementNodeProps {
 }
 
 function ElementNodeComponent({ id, data, selected }: ElementNodeProps) {
-  const { removeNode, updateNode } = useCanvasStore();
+  const { nodes, removeNode, updateNode } = useCanvasStore();
   const [isEditingName, setIsEditingName] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const frontalInputRef = useRef<HTMLInputElement>(null);
@@ -23,6 +24,31 @@ function ElementNodeComponent({ id, data, selected }: ElementNodeProps) {
 
   const highlightClass = data.isHighlighted ? 'highlighted-element' : '';
   const tagColor = data.tagAssignment ? getTagColor('element') : undefined;
+
+  // Check for duplicate names among element nodes
+  // Only check if the name is valid for tagging (not default "New Element")
+  const isDuplicateName = useMemo(() => {
+    if (!data.name || !isValidNameForTag(data.name)) {
+      return false;
+    }
+    const normalizedName = data.name.trim().toLowerCase();
+    const otherElements = nodes.filter(
+      (n) => n.type === 'element' && n.id !== id
+    );
+    return otherElements.some((n) => {
+      const otherData = n.data as ElementNodeData;
+      return otherData.name?.trim().toLowerCase() === normalizedName;
+    });
+  }, [nodes, id, data.name]);
+
+  // Compute display tag: use name-based tag if valid, otherwise fall back to element tag
+  const displayTag = useMemo(() => {
+    if (!data.tagAssignment) return null;
+    if (data.name && isValidNameForTag(data.name)) {
+      return formatNameAsTag(data.name);
+    }
+    return data.tagAssignment;
+  }, [data.tagAssignment, data.name]);
 
   // Handle frontal image selection
   // Note: tagAssignment is handled dynamically by recalculateTags when nodes are connected
@@ -246,7 +272,7 @@ function ElementNodeComponent({ id, data, selected }: ElementNodeProps) {
               />
             )}
           </div>
-          {data.tagAssignment ? (
+          {displayTag ? (
             <span
               className="tag-badge"
               style={{
@@ -255,7 +281,7 @@ function ElementNodeComponent({ id, data, selected }: ElementNodeProps) {
                 borderColor: `${tagColor}40`,
               }}
             >
-              {data.tagAssignment}
+              {displayTag}
             </span>
           ) : (
             <span className="text-sm font-medium">
@@ -274,16 +300,34 @@ function ElementNodeComponent({ id, data, selected }: ElementNodeProps) {
             onChange={handleNameChange}
             onBlur={() => setIsEditingName(false)}
             onKeyDown={(e) => e.key === 'Enter' && setIsEditingName(false)}
-            className="w-full rounded border border-primary bg-background px-2 py-1 text-sm focus:outline-none"
+            className={cn(
+              'w-full rounded border bg-background px-2 py-1 text-sm focus:outline-none',
+              isDuplicateName ? 'border-amber-500' : 'border-primary'
+            )}
             autoFocus
           />
         ) : (
           <button
             onClick={() => setIsEditingName(true)}
-            className="w-full rounded px-2 py-1 text-left text-sm hover:bg-secondary"
+            className={cn(
+              'w-full rounded px-2 py-1 text-left text-sm hover:bg-secondary',
+              isDuplicateName && 'flex items-center gap-1.5'
+            )}
           >
-            {data.name || 'Unnamed Element'}
+            <span className="flex-1 truncate">{data.name || 'Unnamed Element'}</span>
+            {isDuplicateName && (
+              <span title="Duplicate name - tags may conflict">
+                <AlertTriangle
+                  className="h-3.5 w-3.5 shrink-0 text-amber-500"
+                />
+              </span>
+            )}
           </button>
+        )}
+        {isDuplicateName && !isEditingName && (
+          <div className="mt-1 text-[10px] text-amber-500">
+            Duplicate name - tags may conflict
+          </div>
         )}
       </div>
 
@@ -372,6 +416,8 @@ function ElementNodeComponent({ id, data, selected }: ElementNodeProps) {
           </button>
         </div>
       </div>
+
+      <HashtagBadges nodeId={id} />
 
       {/* Output Handle */}
       <Handle type="source" position={Position.Right} id="output" />

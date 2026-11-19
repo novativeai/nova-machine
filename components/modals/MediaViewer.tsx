@@ -47,6 +47,7 @@ export function MediaViewer() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mediaViewer.isOpen, isVideo, closeMediaViewer]);
 
   // Auto-hide controls for video

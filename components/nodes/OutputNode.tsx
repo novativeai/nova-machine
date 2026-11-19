@@ -1,7 +1,7 @@
 'use client';
 
-import { memo, useState, useRef } from 'react';
-import { Handle, Position } from '@xyflow/react';
+import { memo, useState, useRef, useCallback } from 'react';
+import { Handle, Position, useReactFlow } from '@xyflow/react';
 import {
   Film,
   Download,
@@ -16,12 +16,16 @@ import {
   MessageSquare,
   Image as ImageIcon,
   Maximize2,
+  User,
 } from 'lucide-react';
 import type { OutputNodeData } from '@/types';
 import { useCanvasStore } from '@/stores';
 import { useModalStore } from '@/stores';
-import { cn, formatDuration, formatCost } from '@/lib/utils';
-import { getModelDisplayName } from '@/lib/fal';
+import { useCharacterGeneration } from '@/hooks';
+import { cn, formatDuration } from '@/lib/utils';
+import { formatUsd, getModelDisplayName } from '@/lib/fal';
+import { ChainValidationCard } from './ChainValidationCard';
+import { HashtagBadges } from './HashtagBadges';
 
 interface OutputNodeProps {
   id: string;
@@ -32,13 +36,21 @@ interface OutputNodeProps {
 function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
   const { removeNode, updateNode } = useCanvasStore();
   const { openMediaViewer } = useModalStore();
+  const { generateCharacter } = useCharacterGeneration();
+  const { getNode } = useReactFlow();
   const [isPlaying, setIsPlaying] = useState(false);
   const [showVideo, setShowVideo] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [showCharacterConfirm, setShowCharacterConfirm] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   const isVideoOutput = data.outputType === 'video';
   const isReference = data.role === 'reference';
+
+  // fal.ai cost recorded at generation time (USD, billed to the user's own fal.ai account)
+  const estimatedCost = data.generationMetadata?.cost;
+  const costBreakdown = data.generationMetadata?.costBreakdown;
+  const costIsEstimate = data.generationMetadata?.costIsEstimate ?? false;
 
   const handleConvertToReference = () => {
     updateNode(id, { role: 'reference' });
@@ -101,7 +113,44 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
     }
   };
 
+  const handleGenerateCharacter = useCallback(() => {
+    const imageUrl = data.imageUrl;
+    if (!imageUrl) return;
+
+    // Get current node position
+    const node = getNode(id);
+    const position = node?.position || { x: 0, y: 0 };
+
+    generateCharacter(id, imageUrl, position);
+  }, [id, data.imageUrl, getNode, generateCharacter]);
+
   const mediaUrl = isVideoOutput ? data.videoUrl : data.imageUrl;
+
+  // CHAIN: Placeholder rendering for nodes awaiting generation
+  if (data.isPlaceholder) {
+    return (
+      <div className={cn('nova-node w-64 relative', selected && 'selected')}>
+        <Handle type="target" position={Position.Left} id="input" />
+        <div className="nova-drag-handle p-4">
+          <div className="h-36 rounded-lg border-2 border-dashed border-border/40 bg-muted/10 flex items-center justify-center">
+            <div className="text-center">
+              <div className="mx-auto h-8 w-8 rounded-full border-2 border-dashed border-muted-foreground/30 flex items-center justify-center mb-2">
+                <Clock className="h-4 w-4 text-muted-foreground/40 animate-pulse" />
+              </div>
+              <p className="text-xs text-muted-foreground/50">Waiting for generation...</p>
+              {data.chainStepIndex !== undefined && (
+                <p className="mt-1 text-[10px] text-muted-foreground/30">
+                  Step {data.chainStepIndex + 1}
+                </p>
+              )}
+            </div>
+          </div>
+          <HashtagBadges nodeId={id} />
+        </div>
+        <Handle type="source" position={Position.Right} id="output" />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -337,14 +386,26 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
             <span className="text-muted-foreground">Ratio</span>
             <span className="font-medium">{data.generationMetadata.aspectRatio}</span>
           </div>
-          <div className="flex items-center justify-between">
-            <span className="text-muted-foreground">Cost</span>
-            <span className="flex items-center gap-0.5 font-medium text-green-500">
-              <DollarSign className="h-3 w-3" />
-              {formatCost(data.generationMetadata.cost).replace('$', '')}
-            </span>
-          </div>
+          {estimatedCost != null && (
+            <div className="flex items-center justify-between">
+              <span className="text-muted-foreground">fal cost</span>
+              <span
+                className="flex items-center gap-0.5 font-medium text-white/60"
+                title="Billed by fal.ai to your own account"
+              >
+                <DollarSign className="h-3 w-3" />
+                {costIsEstimate ? '~' : ''}
+                {formatUsd(estimatedCost).replace('$', '')}
+              </span>
+            </div>
+          )}
         </div>
+        {costBreakdown && (
+          <p className="mt-1.5 border-t border-white/5 pt-1.5 text-[10px] leading-snug text-white/35">
+            {costBreakdown}
+            {costIsEstimate && ' · estimate (fal bills by tokens)'}
+          </p>
+        )}
       </div>
 
       {/* Actions */}
@@ -357,6 +418,18 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
           >
             <Download className={cn('h-4 w-4', isDownloading && 'animate-pulse')} />
             {isDownloading ? 'Downloading...' : 'Download'}
+          </button>
+        )}
+        {/* Image Reference: Generate Character button (50/50 with Download) */}
+        {isReference && !isVideoOutput && data.imageUrl && (
+          <button
+            onClick={() => setShowCharacterConfirm(true)}
+            disabled={data.isGeneratingCharacter}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-secondary px-3 py-2.5 text-xs font-medium transition-all hover:bg-secondary/80 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+            title="Generate character from this image"
+          >
+            <User className="h-4 w-4" />
+            Character
           </button>
         )}
         {/* Video: Chain button */}
@@ -381,9 +454,77 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
         )}
       </div>
 
-      {/* Output Handle (when converted to reference) */}
-      {isReference && (
+      {/* Character Generation Confirmation Dialog */}
+      {showCharacterConfirm && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center rounded-lg bg-background/90 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-3 p-4 text-center">
+            <User className="h-6 w-6 text-primary" />
+            <div>
+              <div className="text-sm font-medium">Generate Character?</div>
+              <div className="mt-1 text-xs text-muted-foreground">
+                Creates side & back views (~$0.30)
+              </div>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowCharacterConfirm(false)}
+                className="rounded-md bg-secondary px-3 py-1.5 text-xs hover:bg-secondary/80"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setShowCharacterConfirm(false);
+                  handleGenerateCharacter();
+                }}
+                className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground hover:bg-primary/90"
+              >
+                Generate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Character Generation Loading Overlay */}
+      {data.isGeneratingCharacter && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center rounded-lg bg-background/80 backdrop-blur-sm">
+          <div className="flex flex-col items-center gap-3">
+            <div className="h-10 w-10 rounded-full animate-shimmer" />
+            <span className="text-xs text-muted-foreground">Generating character...</span>
+          </div>
+        </div>
+      )}
+
+      {/* Character Generation Error */}
+      {data.characterGenerationError && (
+        <div className="mt-2 flex items-start gap-1.5 rounded bg-destructive/10 px-2 py-1 text-xs text-destructive">
+          <span className="flex-1">{data.characterGenerationError}</span>
+          <button
+            onClick={() => updateNode(id, { characterGenerationError: undefined })}
+            className="mt-0.5 rounded p-0.5 transition-colors hover:bg-destructive/20"
+            title="Dismiss error"
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
+
+      {/* Hashtag badges */}
+      <div className="nova-drag-handle px-3 pb-2">
+        <HashtagBadges nodeId={id} />
+      </div>
+
+      {/* Output Handle (when converted to reference or chain node) */}
+      {(isReference || data.chainId) && (
         <Handle type="source" position={Position.Right} id="output" />
+      )}
+
+      {/* Chain validation card - rendered outside main div to avoid overflow clipping */}
+      {data.chainId && (
+        <div className="absolute -bottom-14 left-1/2 z-50 -translate-x-1/2" style={{ overflow: 'visible' }}>
+          <ChainValidationCard outputNodeId={id} />
+        </div>
       )}
     </div>
   );

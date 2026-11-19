@@ -1,0 +1,127 @@
+INVITATION ACCEPT PAGE STRUCTURE
+=================================
+
+Route: /invite/[token]/page.tsx
+
+┌─────────────────────────────────────────────────────────────┐
+│                    INVITATION ACCEPT PAGE                    │
+│                     (Dark Theme UI)                          │
+└─────────────────────────────────────────────────────────────┘
+
+STATE MANAGEMENT:
+─────────────────
+├── loading       → Shows spinner + "Loading invitation..."
+├── not-found     → Red X icon + "Invitation Not Found"
+├── expired       → Yellow warning + "Invitation Expired"
+├── error         → Red X icon + "Something Went Wrong"
+└── valid         → Shows invitation details (see below)
+
+
+VALID INVITATION UI:
+────────────────────
+┌───────────────────────────────────────────────────────────┐
+│  ┌─────────────────────────────────────────────────────┐  │
+│  │         [Cyan Icon: Users]                          │  │
+│  │                                                     │  │
+│  │       "You've been invited!"                        │  │
+│  │                                                     │  │
+│  │  ┌───────────────────────────────────────────────┐  │  │
+│  │  │  Board: "Product Launch Video"                │  │  │
+│  │  │  Invited by: Sarah Connor                     │  │  │
+│  │  │  Your role: [Editor Badge] or [Viewer Badge]  │  │  │
+│  │  └───────────────────────────────────────────────┘  │  │
+│  │                                                     │  │
+│  │  [IF LOGGED IN]                                     │  │
+│  │  ┌────────────┐  ┌────────────┐                    │  │
+│  │  │  Decline   │  │   Accept   │                    │  │
+│  │  │ (Secondary)│  │  (Primary) │                    │  │
+│  │  └────────────┘  └────────────┘                    │  │
+│  │                                                     │  │
+│  │  [IF NOT LOGGED IN]                                 │  │
+│  │  ┌──────────────────────────────────────────────┐  │  │
+│  │  │     Sign Up to Accept (Primary)              │  │  │
+│  │  └──────────────────────────────────────────────┘  │  │
+│  │  ───────── Already have an account? ─────────     │  │
+│  │  ┌──────────────────────────────────────────────┐  │  │
+│  │  │          Sign In (Secondary)                 │  │  │
+│  │  └──────────────────────────────────────────────┘  │  │
+│  └─────────────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────────────┘
+
+
+USER FLOWS:
+───────────
+
+LOGGED IN USER:
+1. Click Accept → Add as collaborator → Redirect to /canvas?boardId={id}
+2. Click Decline → Mark declined → Redirect to /dashboard
+
+NOT LOGGED IN USER:
+1. Click "Sign Up to Accept" → Store token in sessionStorage → /sign-up
+2. Click "Sign In" → Store token in sessionStorage → /sign-in
+3. After auth → Check sessionStorage → Redirect back to /invite/{token}
+
+
+COMPONENTS USED:
+────────────────
+✓ Framer Motion (animations)
+✓ Lucide React Icons (Users, Loader2, XCircle, AlertCircle)
+✓ TextureButton (custom UI component)
+✓ useAuth() hook
+✓ useParams() for token extraction
+✓ useRouter() for navigation
+
+
+STYLING:
+────────
+Background:       bg-[#0a0a0a]
+Card:            bg-neutral-900, border-white/10, rounded-2xl
+Icon Container:  w-16 h-16, bg-cyan-500/10, rounded-full
+Role Badges:
+  - Editor:      bg-cyan-500/10, text-cyan-400, border-cyan-500/20
+  - Viewer:      bg-blue-500/10, text-blue-400, border-blue-500/20
+Text:
+  - Primary:     text-white
+  - Secondary:   text-neutral-400
+  - Muted:       text-neutral-500
+
+
+TOAST NOTIFICATIONS:
+────────────────────
+✓ Success: Green background (e.g., "You've joined the board!")
+✓ Error: Red background (e.g., "Failed to accept invitation")
+✓ Info: Blue background (e.g., "Invitation declined")
+✓ Warning: Yellow background (optional email mismatch warning)
+
+Position: Top-right corner, auto-dismiss after 3 seconds
+
+
+SECURITY:
+─────────
+✓ Token-based access (unique per invitation)
+✓ Expiration checking (7-day default)
+✓ Status validation (only "pending" can be accepted)
+✓ SessionStorage for post-auth flow (client-side)
+✓ Optional email matching (currently permissive)
+
+
+FIRESTORE INTEGRATION:
+──────────────────────
+Collections Used:
+  - boardInvitations (token lookup)
+  - boards/{boardId}/collaborators (add collaborator)
+  - boards (get board name)
+
+Functions:
+  - getInvitationByToken(token)
+  - acceptInvitation(invitationId, userId)
+  - declineInvitation(invitationId)
+  - addCollaborator(boardId, collaborator)
+  - getBoard(boardId)
+
+
+RESPONSIVE DESIGN:
+──────────────────
+Mobile:         Full-width card (p-4), stacked buttons
+Tablet/Desktop: Centered card (max-w-md), horizontal buttons
+All Screens:    Consistent padding, readable text sizes

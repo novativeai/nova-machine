@@ -43,7 +43,8 @@ function TaggedEdgeComponent({
     targetPosition,
   });
 
-  const edgeColor = data?.color || '#525252';
+  const isChainEdge = data?.isChainEdge || false;
+  const edgeColor = isChainEdge ? '#6B7280' : (data?.color || '#525252');
   const isAnimated = data?.animated || false;
 
   return (
@@ -55,6 +56,7 @@ function TaggedEdgeComponent({
         style={{
           stroke: edgeColor,
           strokeWidth: selected ? 3 : 2,
+          strokeDasharray: isChainEdge ? '8 4' : undefined,
           filter: selected ? `drop-shadow(0 0 4px ${edgeColor})` : undefined,
         }}
         className={isAnimated ? 'animated-edge' : ''}

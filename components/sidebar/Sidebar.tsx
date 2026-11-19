@@ -9,15 +9,15 @@ import {
   MessageSquare,
   ChevronLeft,
   ChevronRight,
-  Plus,
   Camera,
   Sun,
+  Music,
 } from 'lucide-react';
 import { useCanvasStore, useModalStore, createNode } from '@/stores';
 import { cn } from '@/lib/utils';
 
 interface NodeTypeOption {
-  type: 'prompt' | 'image' | 'video' | 'element' | 'camera' | 'lighting';
+  type: 'prompt' | 'image' | 'video' | 'element' | 'camera' | 'lighting' | 'audio';
   label: string;
   icon: React.ReactNode;
   description: string;
@@ -60,17 +60,22 @@ const NODE_TYPES: NodeTypeOption[] = [
     icon: <Sun className="h-5 w-5" />,
     description: 'Lighting style and mood',
   },
+  {
+    type: 'audio',
+    label: 'Audio',
+    icon: <Music className="h-5 w-5" />,
+    description: 'Audio that drives the video (LTX 2.5, 2–20s)',
+  },
 ];
 
 export function Sidebar() {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const { addNode } = useCanvasStore();
   const { openElementConfigModal } = useModalStore();
-  const { screenToFlowPosition, getViewport } = useReactFlow();
+  const { screenToFlowPosition } = useReactFlow();
 
   const handleAddNode = (type: NodeTypeOption['type']) => {
     // Get center of viewport
-    const viewport = getViewport();
     const centerX = window.innerWidth / 2;
     const centerY = window.innerHeight / 2;
 

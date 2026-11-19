@@ -17,8 +17,6 @@ import type {
   VideoNodeData,
   ElementNodeData,
   OutputNodeData,
-  CameraNodeData,
-  LightingNodeData,
   PromptNode,
   ImageNode,
   VideoNode,
@@ -26,6 +24,7 @@ import type {
   OutputNode,
   CameraNode,
   LightingNode,
+  AudioNode,
 } from '@/types';
 
 interface CanvasState {
@@ -49,6 +48,7 @@ interface CanvasState {
 
   // Selection
   setSelectedNodes: (ids: string[]) => void;
+  getSelectedImageNode: () => NovaNode | null;
 
   // Highlighting
   highlightNode: (id: string, color: string) => void;
@@ -64,8 +64,17 @@ interface CanvasState {
   // Element connection sync
   syncElementConnections: () => void;
 
+  // Hashtag operations
+  addHashtagToNode: (nodeId: string, tag: string) => void;
+  removeHashtagFromNode: (nodeId: string, tag: string) => void;
+  getNodesByHashtag: (tag: string) => NovaNode[];
+  getAllNodeHashtags: () => string[];
+
   // Canvas operations
   clearCanvas: () => void;
+  setNodes: (nodes: NovaNode[]) => void;
+  setEdges: (edges: NovaEdge[]) => void;
+  clearSelection: () => void;
 }
 
 // Create initial prompt node
@@ -81,8 +90,8 @@ const initialPromptNode = {
     // Video settings
     duration: '5' as const,
     aspectRatio: '16:9' as const,
-    negativePrompt: 'blur, distort, and low quality',
-    cfgScale: 0.5,
+    videoResolution: '720p' as const,
+    generateAudio: true, // Seedance 2.5: audio costs the same as silent
     // Image settings
     imageAspectRatio: '1:1' as const,
     imageResolution: '1K' as const,
@@ -171,6 +180,30 @@ export const useCanvasStore = create<CanvasState>()(
       // Selection
       setSelectedNodes: (ids) => {
         set({ selectedNodes: ids });
+      },
+
+      getSelectedImageNode: () => {
+        const { selectedNodes, nodes } = get();
+        if (selectedNodes.length === 0) return null;
+
+        const selectedId = selectedNodes[0];
+        const node = nodes.find((n) => n.id === selectedId);
+        if (!node) return null;
+
+        // Check if it's an image node
+        if (node.type === 'image') {
+          return node;
+        }
+
+        // Check if it's an output node with image type
+        if (node.type === 'output') {
+          const data = node.data as OutputNodeData;
+          if (data.outputType === 'image') {
+            return node;
+          }
+        }
+
+        return null;
       },
 
       // Highlighting
@@ -466,45 +499,124 @@ export const useCanvasStore = create<CanvasState>()(
             };
           }
 
-          // Extract reference images data
-          const referenceUrls: string[] = [];
-          const referenceThumbnails: string[] = [];
+          // Extract reference images data from connected nodes
+          const connectedReferenceUrls: string[] = [];
+          const connectedReferenceThumbnails: string[] = [];
           const referenceFiles: File[] = [];
-          const referenceRemoteUrls: string[] = [];
+          const connectedReferenceRemoteUrls: string[] = [];
 
           for (const refNode of referenceSourceNodes) {
             if (refNode.type === 'image') {
               const imgData = refNode.data as ImageNodeData;
-              referenceUrls.push(imgData.imageUrl);
-              referenceThumbnails.push(imgData.thumbnailUrl);
+              connectedReferenceUrls.push(imgData.imageUrl);
+              connectedReferenceThumbnails.push(imgData.thumbnailUrl);
               if (imgData.file) referenceFiles.push(imgData.file);
-              if (imgData.remoteUrl) referenceRemoteUrls.push(imgData.remoteUrl);
+              if (imgData.remoteUrl) connectedReferenceRemoteUrls.push(imgData.remoteUrl);
             } else if (refNode.type === 'output') {
               const outputData = refNode.data as OutputNodeData;
               if (outputData.imageUrl) {
-                referenceUrls.push(outputData.imageUrl);
-                referenceThumbnails.push(outputData.thumbnailUrl || outputData.imageUrl);
-                referenceRemoteUrls.push(outputData.imageUrl);
+                connectedReferenceUrls.push(outputData.imageUrl);
+                connectedReferenceThumbnails.push(outputData.thumbnailUrl || outputData.imageUrl);
+                connectedReferenceRemoteUrls.push(outputData.imageUrl);
               }
             }
           }
 
+          // Merge connected references with generated references (from character generation)
+          // Generated references are preserved and not overwritten by syncElementConnections
+          const generatedUrls = currentData.generatedReferenceUrls || [];
+          const generatedThumbnails = currentData.generatedReferenceThumbnails || [];
+
+          const finalReferenceUrls = [...connectedReferenceUrls, ...generatedUrls];
+          const finalReferenceThumbnails = [...connectedReferenceThumbnails, ...generatedThumbnails];
+          const finalReferenceRemoteUrls = [...connectedReferenceRemoteUrls, ...generatedUrls]; // Generated URLs are already remote
+
           // Update element node with connected image data
           updateNode(elementNode.id, {
             ...frontalData,
-            referenceImageUrls: referenceUrls,
-            referenceThumbnails: referenceThumbnails,
+            referenceImageUrls: finalReferenceUrls,
+            referenceThumbnails: finalReferenceThumbnails,
             referenceFiles: referenceFiles.length > 0 ? referenceFiles : undefined,
-            referenceRemoteUrls: referenceRemoteUrls.length > 0 ? referenceRemoteUrls : undefined,
-            referenceUploadStatus: referenceRemoteUrls.length === referenceUrls.length ? 'completed' : 'idle',
+            referenceRemoteUrls: finalReferenceRemoteUrls.length > 0 ? finalReferenceRemoteUrls : undefined,
+            referenceUploadStatus: finalReferenceRemoteUrls.length === finalReferenceUrls.length ? 'completed' : 'idle',
             connectedImageSourceIds: currentSourceIds,
           });
         }
       },
 
+      // Hashtag operations
+      addHashtagToNode: (nodeId, tag) => {
+        const normalizedTag = tag.toLowerCase().replace(/^#/, '').trim();
+        if (!normalizedTag) return;
+        set((state) => ({
+          nodes: state.nodes.map((node) => {
+            if (node.id !== nodeId) return node;
+            const currentTags = node.data.hashtags || [];
+            if (currentTags.includes(normalizedTag)) return node;
+            return {
+              ...node,
+              data: {
+                ...node.data,
+                hashtags: [...currentTags, normalizedTag],
+                updatedAt: new Date(),
+              },
+            } as typeof node;
+          }) as NovaNode[],
+        }));
+      },
+
+      removeHashtagFromNode: (nodeId, tag) => {
+        const normalizedTag = tag.toLowerCase().replace(/^#/, '').trim();
+        set((state) => ({
+          nodes: state.nodes.map((node) => {
+            if (node.id !== nodeId) return node;
+            const currentTags = node.data.hashtags || [];
+            return {
+              ...node,
+              data: {
+                ...node.data,
+                hashtags: currentTags.filter((t) => t !== normalizedTag),
+                updatedAt: new Date(),
+              },
+            } as typeof node;
+          }) as NovaNode[],
+        }));
+      },
+
+      getNodesByHashtag: (tag) => {
+        const normalizedTag = tag.toLowerCase().replace(/^#/, '').trim();
+        return get().nodes.filter((node) => {
+          const tags = node.data.hashtags || [];
+          return tags.includes(normalizedTag);
+        });
+      },
+
+      getAllNodeHashtags: () => {
+        const allTags = new Set<string>();
+        for (const node of get().nodes) {
+          const tags = node.data.hashtags || [];
+          for (const tag of tags) {
+            allTags.add(tag);
+          }
+        }
+        return Array.from(allTags).sort();
+      },
+
       // Canvas operations
       clearCanvas: () => {
         set({ nodes: [], edges: [], selectedNodes: [] });
+      },
+
+      setNodes: (nodes: NovaNode[]) => {
+        set({ nodes });
+      },
+
+      setEdges: (edges: NovaEdge[]) => {
+        set({ edges });
+      },
+
+      clearSelection: () => {
+        set({ selectedNodes: [] });
       },
     }),
     {
@@ -675,8 +787,8 @@ export function createNode(
           // Video settings
           duration: '5',
           aspectRatio: '16:9',
-          negativePrompt: 'blur, distort, and low quality',
-          cfgScale: 0.5,
+          videoResolution: '720p',
+          generateAudio: true, // Seedance 2.5: audio costs the same as silent
           // Image settings
           imageAspectRatio: '1:1',
           imageResolution: '1K',
@@ -763,7 +875,7 @@ export function createNode(
           canChain: true,
           generationMetadata: {
             promptUsed: '',
-            modelUsed: 'fal-ai/kling-video/o1/image-to-video',
+            modelUsed: 'bytedance/seedance-2.5/us/text-to-video',
             inputNodes: [],
             duration: 0,
             aspectRatio: '16:9',
@@ -804,6 +916,23 @@ export function createNode(
           ...data,
         },
       } as LightingNode;
+
+    case 'audio':
+      return {
+        id,
+        type: 'audio',
+        position,
+        dragHandle: '.nova-drag-handle',
+        data: {
+          ...baseData,
+          audioUrl: '',
+          fileName: '',
+          fileSize: 0,
+          duration: 0,
+          isHighlighted: false,
+          ...data,
+        },
+      } as AudioNode;
 
     default:
       throw new Error(`Unknown node type: ${type}`);

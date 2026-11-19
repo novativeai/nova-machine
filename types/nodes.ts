@@ -4,7 +4,7 @@ import type { Node, Edge } from '@xyflow/react';
 // CORE ENUMS & CONSTANTS
 // ============================================================================
 
-export type NodeType = 'prompt' | 'image' | 'video' | 'element' | 'output' | 'camera' | 'lighting';
+export type NodeType = 'prompt' | 'image' | 'video' | 'element' | 'output' | 'camera' | 'lighting' | 'audio';
 
 export type TagType = 'image' | 'element' | 'video';
 
@@ -62,25 +62,30 @@ export interface BaseNodeData {
   id: string;
   createdAt: Date;
   updatedAt: Date;
+  /** Organizational hashtags (stored without '#' prefix) */
+  hashtags?: string[];
 }
 
 export interface PromptNodeData extends BaseNodeData {
   prompt: string;
   mode: PromptMode;
-  // Video-specific settings
-  duration: '5' | '10';
-  aspectRatio: '16:9' | '9:16' | '1:1';
-  negativePrompt: string;
-  cfgScale: number;
-  // Image-specific settings
+  // Video-specific settings (Seedance 2.5)
+  duration: VideoDuration;
+  aspectRatio: VideoAspectRatio; // text-to-video and reference-to-video only
+  videoResolution: VideoResolution;
+  generateAudio: boolean; // Same price with or without audio
+  // Image-specific settings (GPT Image 2.6)
   imageAspectRatio: '21:9' | '16:9' | '3:2' | '4:3' | '5:4' | '1:1' | '4:5' | '3:4' | '2:3' | '9:16';
   imageResolution: '1K' | '2K' | '4K';
   // Generation state
   status: GenerationStatus;
   progress: number;
   error?: string;
-  selectedModel?: KlingModel | NanoBananaModel;
+  selectedModel?: GenerationModel;
   connectedInputs: ConnectedInput[];
+  // Chain generation state
+  chainId?: string;
+  chainStepIndex?: number;
 }
 
 export interface ImageNodeData extends BaseNodeData {
@@ -98,6 +103,9 @@ export interface ImageNodeData extends BaseNodeData {
   uploadStatus?: UploadStatus;
   remoteUrl?: string; // fal.ai URL after upload
   uploadError?: string;
+  // Character generation state
+  isGeneratingCharacter?: boolean;
+  characterGenerationError?: string;
 }
 
 export interface VideoNodeData extends BaseNodeData {
@@ -144,6 +152,10 @@ export interface ElementNodeData extends BaseNodeData {
   // When images are connected, these IDs track the source nodes.
   // When disconnected (IDs existed but now no connections), images are cleared.
   connectedImageSourceIds?: string[];
+  // Generated reference images (from character generation, not from connections)
+  // These are preserved by syncElementConnections and merged with connected references
+  generatedReferenceUrls?: string[];
+  generatedReferenceThumbnails?: string[];
 }
 
 export interface OutputNodeData extends BaseNodeData {
@@ -162,6 +174,13 @@ export interface OutputNodeData extends BaseNodeData {
   tagAssignment?: string; // For referencing in prompts when role is 'reference'
   isHighlighted: boolean;
   highlightColor?: string;
+  // Character generation state (for image references)
+  isGeneratingCharacter?: boolean;
+  characterGenerationError?: string;
+  // Chain generation state
+  isPlaceholder?: boolean; // true = ghost node awaiting generation
+  chainId?: string;
+  chainStepIndex?: number;
 }
 
 // Camera angle options - popular Hollywood cinematography styles
@@ -250,6 +269,20 @@ export interface LightingNodeData extends BaseNodeData {
   lightingKey: LightingKey | '';
 }
 
+export interface AudioNodeData extends BaseNodeData {
+  audioUrl: string; // blob URL for preview
+  fileName: string;
+  fileSize: number;
+  duration: number; // audio duration in seconds
+  isHighlighted: boolean;
+  highlightColor?: string;
+  file?: File; // Original file for generation (uploaded to fal.ai)
+  // Background upload state
+  uploadStatus?: UploadStatus;
+  remoteUrl?: string; // fal.ai URL after upload
+  uploadError?: string;
+}
+
 export type NovaNodeData =
   | PromptNodeData
   | ImageNodeData
@@ -257,7 +290,8 @@ export type NovaNodeData =
   | ElementNodeData
   | OutputNodeData
   | CameraNodeData
-  | LightingNodeData;
+  | LightingNodeData
+  | AudioNodeData;
 
 // ============================================================================
 // REACT FLOW NODE TYPES
@@ -272,6 +306,7 @@ export type ElementNode = Node<ElementNodeData & Record<string, unknown>, 'eleme
 export type OutputNode = Node<OutputNodeData & Record<string, unknown>, 'output'>;
 export type CameraNode = Node<CameraNodeData & Record<string, unknown>, 'camera'>;
 export type LightingNode = Node<LightingNodeData & Record<string, unknown>, 'lighting'>;
+export type AudioNode = Node<AudioNodeData & Record<string, unknown>, 'audio'>;
 
 export type NovaNode =
   | PromptNode
@@ -280,7 +315,8 @@ export type NovaNode =
   | ElementNode
   | OutputNode
   | CameraNode
-  | LightingNode;
+  | LightingNode
+  | AudioNode;
 
 // ============================================================================
 // EDGE TYPES
@@ -290,6 +326,10 @@ export interface NovaEdgeData {
   tag?: string;
   color?: string;
   animated?: boolean;
+  /** Whether this edge is part of a chain (output → next prompt) */
+  isChainEdge?: boolean;
+  /** Chain ID this edge belongs to */
+  chainId?: string;
 }
 
 export type NovaEdge = Edge<NovaEdgeData & Record<string, unknown>>;
@@ -310,24 +350,34 @@ export interface ConnectedInput {
 export interface ConnectionValidation {
   isValid: boolean;
   error?: string;
-  suggestedModel?: KlingModel;
+  suggestedModel?: VideoModel;
 }
 
 // ============================================================================
 // GENERATION TYPES
 // ============================================================================
 
-export type KlingModel =
-  | 'fal-ai/kling-video/o1/image-to-video'
-  | 'fal-ai/kling-video/o1/reference-to-video'
-  | 'fal-ai/kling-video/o1/video-to-video/edit'
-  | 'fal-ai/kling-video/o1/video-to-video/reference';
+/** Durations offered in the UI (subset of Seedance's "4".."30" string enum). */
+export type VideoDuration = '4' | '5' | '6' | '8' | '10' | '12' | '15';
 
-export type NanoBananaModel =
-  | 'fal-ai/nano-banana-pro'
-  | 'fal-ai/nano-banana-pro/edit';
+export type VideoAspectRatio = '16:9' | '9:16' | '1:1' | '4:3' | '3:4' | '21:9';
 
-export type GenerationModel = KlingModel | NanoBananaModel;
+export type VideoResolution = '480p' | '720p' | '1080p';
+
+export type VideoModel =
+  | 'bytedance/seedance-2.5/us/text-to-video'
+  | 'bytedance/seedance-2.5/us/image-to-video'
+  | 'bytedance/seedance-2.5/us/reference-to-video';
+
+export type ImageModel =
+  | 'openai/gpt-image-2.6/sunburst/text-to-image'
+  | 'openai/gpt-image-2.6/sunburst/edit';
+
+export type AudioToVideoModel =
+  | 'lightricks/ltx-2.5/audio-to-video/pro'
+  | 'lightricks/ltx-2.5/audio-to-video/fast';
+
+export type GenerationModel = VideoModel | ImageModel | AudioToVideoModel;
 
 export interface GenerationMetadata {
   promptUsed: string;
@@ -336,9 +386,15 @@ export interface GenerationMetadata {
   duration?: number; // Video only
   aspectRatio: string;
   resolution?: string; // Image only
+  generateAudio?: boolean; // Seedance video only
   createdAt: Date;
   requestId: string;
+  /** fal.ai cost in USD for this output (billed to the user's own fal.ai account) */
   cost: number;
+  /** How the cost was computed, e.g. "5s × $0.473/s (720p)" */
+  costBreakdown?: string;
+  /** true when fal bills by tokens and the cost is an estimate */
+  costIsEstimate?: boolean;
 }
 
 export interface GenerationProgress {
@@ -425,3 +481,66 @@ export const VIDEO_ROLE_OPTIONS: RoleOption[] = [
     role: 'edit_source',
   },
 ];
+
+// ============================================================================
+// ASSET TYPES (Saved items in Asset Sidebar)
+// ============================================================================
+
+export type AssetType = 'board' | 'character' | 'scene';
+
+/**
+ * Serialized node for storage (no File objects, dates as strings)
+ */
+export interface SerializedNode {
+  id: string;
+  type: NodeType;
+  position: { x: number; y: number };
+  data: Record<string, unknown>;
+}
+
+/**
+ * Saved canvas/project state
+ */
+export interface SavedBoard {
+  id: string;
+  name: string;
+  thumbnail?: string; // First output image or placeholder
+  nodes: SerializedNode[];
+  edges: NovaEdge[];
+  createdAt: string; // ISO date string for storage
+  updatedAt: string;
+}
+
+/**
+ * Saved character/object for reuse
+ */
+export interface SavedCharacter {
+  id: string;
+  name: string;
+  elementType: ElementType;
+  frontalImageUrl: string; // Remote URL (must be uploaded)
+  frontalThumbnail: string;
+  referenceImageUrls: string[];
+  referenceThumbnails: string[];
+  createdAt: string;
+}
+
+/**
+ * Saved scene image reference
+ */
+export interface SavedScene {
+  id: string;
+  name: string;
+  imageUrl: string; // Remote URL
+  thumbnailUrl: string;
+  category?: string;
+  createdAt: string;
+}
+
+/**
+ * Asset drag data format for drag-and-drop
+ */
+export interface AssetDragData {
+  type: AssetType;
+  id: string;
+}

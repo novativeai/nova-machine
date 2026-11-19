@@ -2,87 +2,198 @@
 
 import { useCallback } from 'react';
 import { nanoid } from 'nanoid';
-import { useCanvasStore, createNode } from '@/stores';
+import { useCanvasStore, createNode, useChainStore } from '@/stores';
 import { useGenerationStore } from '@/stores';
 import { pendingUploads } from './useBackgroundUpload';
+import { useSettingsStore } from '@/stores';
+import { useAuth } from '@/contexts/AuthContext';
+import { persistUrlsToR2 } from '@/lib/r2';
 import {
-  generateVideo,
+  estimateAudioToVideoCost,
+  estimateImageCostFromPixels,
+  generateAudioToVideo,
   generateImage,
-  uploadFile,
-  selectModel,
-  selectImageModel,
-  parseTags,
-  validateTags,
-  calculateCost,
-  calculateImageCost,
+  generateVideo,
+  getAudioSource,
+  getGptImageSize,
   getModelDisplayName,
-  MODEL_PRICING,
+  getReferenceVideoSeconds,
+  FAL_KEY_REQUIRED_MESSAGE,
+  formatNameAsTag,
+  isValidNameForTag,
+  isVideoEdit,
+  LTX_A2V_MAX_AUDIO_SECONDS,
+  LTX_A2V_MIN_AUDIO_SECONDS,
+  planGeneration,
+  translateNameTagsForApi,
+  uploadFile,
+  validateAllTags,
 } from '@/lib/fal';
 import type {
-  KlingInput,
-  KlingModel,
-  KlingElement,
-  KlingImageToVideoInput,
-  KlingReferenceToVideoInput,
-  KlingVideoToVideoEditInput,
-  KlingVideoToVideoReferenceInput,
-  NanoBananaModel,
-  NanoBananaInput,
-  NanoBananaTextToImageInput,
-  NanoBananaImageEditInput,
-  PromptNodeData,
-  ImageNodeData,
-  VideoNodeData,
-  ElementNodeData,
-  OutputNodeData,
+  AudioNodeData,
+  AudioToVideoModel,
   CameraNodeData,
+  ElementNodeData,
+  GenerationMetadata,
+  ImageGenerationInput,
+  ImageModel,
+  ImageNodeData,
   LightingNodeData,
+  LtxAudioToVideoInput,
   NovaNode,
+  OutputNodeData,
+  PromptNodeData,
+  SeedanceImageToVideoInput,
+  SeedanceReferenceToVideoInput,
+  SeedanceTextToVideoInput,
+  VideoGenerationInput,
+  VideoModel,
+  VideoNodeData,
+  VideoResolution,
 } from '@/types';
 import { formatCameraSettings } from '@/components/nodes/CameraNode';
 import { formatLightingSettings } from '@/components/nodes/LightingNode';
 
+// Seedance 2.5 reference-to-video limits (from the endpoint schema)
+const SEEDANCE_MAX_IMAGES = 30;
+const SEEDANCE_MAX_VIDEOS = 10;
+const SEEDANCE_MAX_FILES = 50;
+const SEEDANCE_MIN_VIDEO_SECONDS = 1.8;
+const SEEDANCE_MAX_VIDEO_SECONDS = 30.2;
+// GPT Image 2.6 edit accepts up to 16 input images
+const GPT_IMAGE_MAX_INPUTS = 16;
+
+const VIDEO_HEIGHT: Record<VideoResolution, number> = { '480p': 480, '720p': 720, '1080p': 1080 };
+
+/** Expected output dimensions for a Seedance render (exact size isn't returned by the API). */
+function videoDimensions(resolution: VideoResolution, aspectRatio: string): { width: number; height: number } {
+  const [w, h] = aspectRatio.split(':').map(Number);
+  const short = VIDEO_HEIGHT[resolution];
+  if (!w || !h) return { width: Math.round((short * 16) / 9), height: short };
+  return w >= h
+    ? { width: Math.round((short * w) / h), height: short }
+    : { width: short, height: Math.round((short * h) / w) };
+}
+
+/** Tag index for sorting ("@Image3" → 3); untagged media sort last. */
+function tagIndex(tag: string | undefined): number {
+  const match = tag?.match(/(\d+)$/);
+  return match ? parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
+}
+
 /**
  * Wait for all pending uploads for the given nodes to complete
- * Returns the updated node data with remoteUrls populated
  */
 async function waitForPendingUploads(connectedNodes: NovaNode[]): Promise<void> {
   const uploadPromises: Promise<unknown>[] = [];
 
   for (const node of connectedNodes) {
-    // Check for node-level pending uploads (image/video nodes)
     const nodeUpload = pendingUploads.get(node.id);
-    if (nodeUpload) {
-      console.log('[Generation] Waiting for pending upload for node:', node.id);
-      uploadPromises.push(nodeUpload);
-    }
+    if (nodeUpload) uploadPromises.push(nodeUpload);
 
-    // Check for element node uploads (frontal and reference)
     if (node.type === 'element') {
       const frontalUpload = pendingUploads.get(`${node.id}:frontal`);
-      if (frontalUpload) {
-        console.log('[Generation] Waiting for pending frontal upload for element:', node.id);
-        uploadPromises.push(frontalUpload);
-      }
+      if (frontalUpload) uploadPromises.push(frontalUpload);
       const referenceUpload = pendingUploads.get(`${node.id}:references`);
-      if (referenceUpload) {
-        console.log('[Generation] Waiting for pending reference uploads for element:', node.id);
-        uploadPromises.push(referenceUpload);
-      }
+      if (referenceUpload) uploadPromises.push(referenceUpload);
     }
   }
 
   if (uploadPromises.length > 0) {
     console.log('[Generation] Waiting for', uploadPromises.length, 'pending upload(s)...');
     await Promise.all(uploadPromises);
-    console.log('[Generation] All pending uploads completed');
   }
 }
 
+/** Throw if any connected node failed its background upload. */
+function assertNoUploadErrors(nodes: NovaNode[]): void {
+  for (const node of nodes) {
+    if (node.type === 'image') {
+      const data = node.data as ImageNodeData;
+      if (data.uploadStatus === 'error') {
+        throw new Error(`Image "${data.fileName}" failed to upload: ${data.uploadError || 'Unknown error'}`);
+      }
+    } else if (node.type === 'video') {
+      const data = node.data as VideoNodeData;
+      if (data.uploadStatus === 'error') {
+        throw new Error(`Video "${data.fileName}" failed to upload: ${data.uploadError || 'Unknown error'}`);
+      }
+    } else if (node.type === 'element') {
+      const data = node.data as ElementNodeData;
+      if (data.frontalUploadStatus === 'error') {
+        throw new Error(`Element "${data.name}" frontal image failed to upload: ${data.frontalUploadError || 'Unknown error'}`);
+      }
+      if (data.referenceUploadStatus === 'error') {
+        throw new Error(`Element "${data.name}" reference images failed to upload: ${data.referenceUploadError || 'Unknown error'}`);
+      }
+    } else if (node.type === 'audio') {
+      const data = node.data as AudioNodeData;
+      if (data.uploadStatus === 'error') {
+        throw new Error(`Audio "${data.fileName}" failed to upload: ${data.uploadError || 'Unknown error'}`);
+      }
+    }
+  }
+}
+
+async function resolveImageUrl(data: ImageNodeData): Promise<string> {
+  if (data.remoteUrl) return data.remoteUrl;
+  if (data.file) return uploadFile(data.file);
+  return data.imageUrl;
+}
+
+async function resolveVideoUrl(data: VideoNodeData): Promise<string> {
+  if (data.remoteUrl) return data.remoteUrl;
+  if (data.file) return uploadFile(data.file);
+  return data.videoUrl;
+}
+
+/** Frontal image followed by reference views, uploading on demand. */
+async function resolveElementUrls(data: ElementNodeData): Promise<string[]> {
+  if (!data.frontalFile && !data.frontalImageUrl && !data.frontalRemoteUrl) {
+    throw new Error(`Element "${data.name}" is missing a frontal image. Please add a frontal image before generating.`);
+  }
+
+  const frontal = data.frontalRemoteUrl
+    ? data.frontalRemoteUrl
+    : data.frontalFile
+      ? await uploadFile(data.frontalFile)
+      : data.frontalImageUrl;
+
+  let references: string[] = [];
+  if (data.referenceRemoteUrls && data.referenceRemoteUrls.length > 0) {
+    references = data.referenceRemoteUrls;
+  } else if (data.referenceFiles && data.referenceFiles.length > 0) {
+    references = await Promise.all(data.referenceFiles.map((f) => uploadFile(f)));
+  } else if (data.referenceImageUrls.length > 0) {
+    references = data.referenceImageUrls;
+  }
+
+  return [frontal, ...references];
+}
+
+async function resolveAudioUrl(data: AudioNodeData): Promise<string> {
+  if (data.remoteUrl) return data.remoteUrl;
+  if (data.file) return uploadFile(data.file);
+  if (data.audioUrl) {
+    // Only a blob URL is available: materialise it and upload
+    const blob = await (await fetch(data.audioUrl)).blob();
+    return uploadFile(new File([blob], data.fileName || 'audio.mp3', { type: blob.type }));
+  }
+  throw new Error('Audio file is required for audio-to-video. Please upload an audio file to the Audio node.');
+}
+
+interface OutputPayload {
+  outputType: 'video' | 'image';
+  url: string;
+  dimensions: { width: number; height: number };
+  videoDuration?: number;
+  metadata: GenerationMetadata;
+}
+
 export function useGeneration() {
+  const { user } = useAuth();
+
   const {
-    nodes,
-    edges,
     updateNode,
     addNode,
     addEdge,
@@ -95,827 +206,618 @@ export function useGeneration() {
     setActiveGeneration,
     completeGeneration,
     failGeneration,
-    isGenerating,
   } = useGenerationStore();
 
   /**
-   * Build the API input based on connected nodes and model type
-   * Uses remoteUrl from background uploads when available, otherwise uploads on demand
+   * Persist fal.ai output URLs to R2 in the background and swap them into the output node.
    */
-  const buildApiInput = useCallback(
-    async (promptNodeId: string, promptData: PromptNodeData): Promise<KlingInput> => {
-      const connectedNodes = getConnectedInputs(promptNodeId);
+  const persistOutputToR2 = useCallback(
+    async (outputNodeId: string, urls: { imageUrl?: string; videoUrl?: string }) => {
+      if (!user) return;
+      try {
+        const token = await user.getIdToken();
+        const urlsToPersist: Array<{ url: string; category: 'outputs' }> = [];
+        if (urls.videoUrl) urlsToPersist.push({ url: urls.videoUrl, category: 'outputs' });
+        if (urls.imageUrl) urlsToPersist.push({ url: urls.imageUrl, category: 'outputs' });
+        if (urlsToPersist.length === 0) return;
 
-      // Check for connected camera nodes and build camera settings string
-      const cameraNodes = connectedNodes.filter((n) => n.type === 'camera');
-      let cameraSettingsText = '';
-      if (cameraNodes.length > 0) {
-        const allCameraSettings = cameraNodes
-          .map((n) => formatCameraSettings(n.data as CameraNodeData))
-          .filter((s) => s.length > 0);
-        if (allCameraSettings.length > 0) {
-          cameraSettingsText = allCameraSettings.join(', ');
-          console.log('[Generation] Camera settings:', cameraSettingsText);
+        const r2Map = await persistUrlsToR2(token, urlsToPersist);
+        if (r2Map.size === 0) return;
+
+        const update: Record<string, unknown> = {};
+        if (urls.videoUrl && r2Map.has(urls.videoUrl)) {
+          update.videoUrl = r2Map.get(urls.videoUrl);
         }
-      }
-
-      // Check for connected lighting nodes and build lighting settings string
-      const lightingNodes = connectedNodes.filter((n) => n.type === 'lighting');
-      let lightingSettingsText = '';
-      if (lightingNodes.length > 0) {
-        const allLightingSettings = lightingNodes
-          .map((n) => formatLightingSettings(n.data as LightingNodeData))
-          .filter((s) => s.length > 0);
-        if (allLightingSettings.length > 0) {
-          lightingSettingsText = allLightingSettings.join(', ');
-          console.log('[Generation] Lighting settings:', lightingSettingsText);
+        if (urls.imageUrl && r2Map.has(urls.imageUrl)) {
+          update.imageUrl = r2Map.get(urls.imageUrl);
+          update.thumbnailUrl = r2Map.get(urls.imageUrl);
         }
-      }
-
-      // Append camera and lighting settings to prompt if any
-      const settingsParts = [cameraSettingsText, lightingSettingsText].filter((s) => s.length > 0);
-      const enhancedPrompt = settingsParts.length > 0
-        ? `${promptData.prompt}. ${settingsParts.join('. ')}`
-        : promptData.prompt;
-
-      const model = selectModel(
-        connectedNodes.map((n) => ({
-          nodeId: n.id,
-          nodeType: n.type,
-          handleId: '',
-          tag: getEdgeTag(n.id, promptNodeId),
-          // Include outputType for output nodes so model selector can detect video/image inputs
-          outputType: n.type === 'output' ? (n.data as OutputNodeData).outputType : undefined,
-          // Include role for image nodes so model selector can detect reference vs start/end frames
-          role: n.type === 'image' ? (n.data as ImageNodeData).role : undefined,
-        })),
-        promptData.prompt
-      );
-
-      // Collect data from connected nodes, converting files to base64
-      const images: { url: string; tag?: string; role: string }[] = [];
-      const videos: { url: string; tag?: string }[] = [];
-      const elements: KlingElement[] = [];
-
-      for (const node of connectedNodes) {
-        if (node.type === 'image') {
-          const data = node.data as ImageNodeData;
-
-          // Check for upload error
-          if (data.uploadStatus === 'error') {
-            throw new Error(`Image "${data.fileName}" failed to upload: ${data.uploadError || 'Unknown error'}`);
-          }
-
-          // Use remoteUrl from background upload if available, otherwise upload on demand
-          let url: string;
-          if (data.remoteUrl) {
-            url = data.remoteUrl;
-            console.log('[Generation] Using pre-uploaded URL for image:', node.id);
-          } else if (data.file) {
-            console.log('[Generation] Uploading image on demand:', node.id);
-            url = await uploadFile(data.file);
-          } else {
-            url = data.imageUrl;
-          }
-
-          images.push({
-            url,
-            tag: getEdgeTag(node.id, promptNodeId),
-            role: data.role,
-          });
-        } else if (node.type === 'video') {
-          const data = node.data as VideoNodeData;
-
-          // Check for upload error
-          if (data.uploadStatus === 'error') {
-            throw new Error(`Video "${data.fileName}" failed to upload: ${data.uploadError || 'Unknown error'}`);
-          }
-
-          // Use remoteUrl from background upload if available, otherwise upload on demand
-          let url: string;
-          if (data.remoteUrl) {
-            url = data.remoteUrl;
-            console.log('[Generation] Using pre-uploaded URL for video:', node.id);
-          } else if (data.file) {
-            console.log('[Generation] Uploading video on demand:', node.id);
-            url = await uploadFile(data.file);
-          } else {
-            url = data.videoUrl;
-          }
-
-          videos.push({
-            url,
-            tag: getEdgeTag(node.id, promptNodeId),
-          });
-        } else if (node.type === 'element') {
-          const data = node.data as ElementNodeData;
-
-          // Check for upload errors
-          if (data.frontalUploadStatus === 'error') {
-            throw new Error(`Element "${data.name}" frontal image failed to upload: ${data.frontalUploadError || 'Unknown error'}`);
-          }
-          if (data.referenceUploadStatus === 'error') {
-            throw new Error(`Element "${data.name}" reference images failed to upload: ${data.referenceUploadError || 'Unknown error'}`);
-          }
-
-          // Validate that frontal image exists
-          if (!data.frontalFile && !data.frontalImageUrl && !data.frontalRemoteUrl) {
-            throw new Error(`Element "${data.name}" is missing a frontal image. Please add a frontal image before generating.`);
-          }
-
-          // Use remoteUrl from background upload if available, otherwise upload on demand
-          let frontalUrl: string;
-          if (data.frontalRemoteUrl) {
-            frontalUrl = data.frontalRemoteUrl;
-            console.log('[Generation] Using pre-uploaded URL for element frontal:', node.id);
-          } else if (data.frontalFile) {
-            console.log('[Generation] Uploading element frontal on demand:', node.id);
-            frontalUrl = await uploadFile(data.frontalFile);
-          } else {
-            frontalUrl = data.frontalImageUrl;
-          }
-
-          // Use remoteUrls from background upload if available, otherwise upload on demand
-          let referenceUrls: string[] | undefined;
-          if (data.referenceRemoteUrls && data.referenceRemoteUrls.length > 0) {
-            referenceUrls = data.referenceRemoteUrls;
-            console.log('[Generation] Using pre-uploaded URLs for element references:', node.id);
-          } else if (data.referenceFiles && data.referenceFiles.length > 0) {
-            console.log('[Generation] Uploading element references on demand:', node.id);
-            referenceUrls = await Promise.all(
-              data.referenceFiles.map((f) => uploadFile(f))
-            );
-          } else if (data.referenceImageUrls.length > 0) {
-            referenceUrls = data.referenceImageUrls;
-          }
-
-          elements.push({
-            frontal_image_url: frontalUrl,
-            reference_image_urls: referenceUrls,
-          });
-        } else if (node.type === 'output') {
-          // Handle output nodes converted to reference
-          const data = node.data as OutputNodeData;
-          if (data.role === 'reference') {
-            if (data.outputType === 'image' && data.imageUrl) {
-              // Treat as image reference
-              images.push({
-                url: data.imageUrl,
-                tag: getEdgeTag(node.id, promptNodeId),
-                role: 'reference',
-              });
-            } else if (data.outputType === 'video' && data.videoUrl) {
-              // Treat as video reference
-              videos.push({
-                url: data.videoUrl,
-                tag: getEdgeTag(node.id, promptNodeId),
-              });
-            }
-          }
-        }
-      }
-
-      // Log what we're about to send
-      console.log('[Generation] Building input for model:', model);
-      console.log('[Generation] Original Prompt:', promptData.prompt);
-      console.log('[Generation] Enhanced Prompt:', enhancedPrompt);
-      console.log('[Generation] Elements:', elements.length);
-      console.log('[Generation] Images:', images.length);
-      console.log('[Generation] Videos:', videos.length);
-
-      // Build input based on model
-      switch (model) {
-        case 'fal-ai/kling-video/o1/image-to-video': {
-          const startFrame = images.find((i) => i.role === 'start_frame');
-          const endFrame = images.find((i) => i.role === 'end_frame');
-
-          if (!startFrame) {
-            throw new Error('Start frame is required for Image-to-Video');
-          }
-
-          const input: KlingImageToVideoInput = {
-            prompt: enhancedPrompt,
-            start_image_url: startFrame.url,
-            end_image_url: endFrame?.url,
-            duration: promptData.duration,
-            aspect_ratio: promptData.aspectRatio,
-            negative_prompt: promptData.negativePrompt,
-            cfg_scale: promptData.cfgScale,
-          };
-          return input;
-        }
-
-        case 'fal-ai/kling-video/o1/reference-to-video': {
-          // Include images with @Image tags OR role='reference'
-          const imageUrls = images
-            .filter((i) => i.tag?.startsWith('@Image') || i.role === 'reference')
-            .map((i) => i.url);
-
-          const input: KlingReferenceToVideoInput = {
-            prompt: enhancedPrompt,
-            image_urls: imageUrls.length > 0 ? imageUrls : undefined,
-            elements: elements.length > 0 ? elements : undefined,
-            duration: promptData.duration,
-            aspect_ratio: promptData.aspectRatio,
-          };
-          return input;
-        }
-
-        case 'fal-ai/kling-video/o1/video-to-video/edit': {
-          const video = videos[0];
-          if (!video) {
-            throw new Error('Video is required for Video-to-Video Edit');
-          }
-
-          // Include images with @Image tags OR role='reference'
-          const imageUrls = images
-            .filter((i) => i.tag?.startsWith('@Image') || i.role === 'reference')
-            .map((i) => i.url);
-
-          const input: KlingVideoToVideoEditInput = {
-            prompt: enhancedPrompt,
-            video_url: video.url,
-            image_urls: imageUrls.length > 0 ? imageUrls : undefined,
-            elements: elements.length > 0 ? elements : undefined,
-          };
-          return input;
-        }
-
-        case 'fal-ai/kling-video/o1/video-to-video/reference': {
-          const video = videos[0];
-          if (!video) {
-            throw new Error('Video is required for Video-to-Video Reference');
-          }
-
-          // Include images with @Image tags OR role='reference'
-          const imageUrls = images
-            .filter((i) => i.tag?.startsWith('@Image') || i.role === 'reference')
-            .map((i) => i.url);
-
-          const input: KlingVideoToVideoReferenceInput = {
-            prompt: enhancedPrompt,
-            video_url: video.url,
-            image_urls: imageUrls.length > 0 ? imageUrls : undefined,
-            elements: elements.length > 0 ? elements : undefined,
-            duration: promptData.duration,
-            aspect_ratio: promptData.aspectRatio,
-          };
-          return input;
-        }
-
-        default:
-          throw new Error(`Unknown model: ${model}`);
+        if (Object.keys(update).length > 0) updateNode(outputNodeId, update);
+      } catch (error) {
+        // Non-fatal: fal.ai URL still works short-term
+        console.warn('[R2 Persist] Failed to persist output:', error);
       }
     },
-    [getConnectedInputs, getEdgeTag]
+    [user, updateNode]
   );
 
   /**
-   * Build the API input for image generation (Nano Banana Pro)
+   * Prompt text sent to the API: user prompt + camera/lighting settings,
+   * with element name tags (@Alice) translated to their edge tags (@Element1).
    */
-  const buildImageApiInput = useCallback(
-    async (promptNodeId: string, promptData: PromptNodeData): Promise<NanoBananaInput> => {
-      const connectedNodes = getConnectedInputs(promptNodeId);
-
-      // Check for connected camera nodes and build camera settings string
-      const cameraNodes = connectedNodes.filter((n) => n.type === 'camera');
-      let cameraSettingsText = '';
-      if (cameraNodes.length > 0) {
-        const allCameraSettings = cameraNodes
+  const buildPromptText = useCallback(
+    (promptNodeId: string, promptData: PromptNodeData, connectedNodes: NovaNode[]): string => {
+      const settingsParts = [
+        connectedNodes
+          .filter((n) => n.type === 'camera')
           .map((n) => formatCameraSettings(n.data as CameraNodeData))
-          .filter((s) => s.length > 0);
-        if (allCameraSettings.length > 0) {
-          cameraSettingsText = allCameraSettings.join(', ');
-          console.log('[Generation] Camera settings for image:', cameraSettingsText);
-        }
-      }
-
-      // Check for connected lighting nodes and build lighting settings string
-      const lightingNodes = connectedNodes.filter((n) => n.type === 'lighting');
-      let lightingSettingsText = '';
-      if (lightingNodes.length > 0) {
-        const allLightingSettings = lightingNodes
+          .filter((s) => s.length > 0)
+          .join(', '),
+        connectedNodes
+          .filter((n) => n.type === 'lighting')
           .map((n) => formatLightingSettings(n.data as LightingNodeData))
-          .filter((s) => s.length > 0);
-        if (allLightingSettings.length > 0) {
-          lightingSettingsText = allLightingSettings.join(', ');
-          console.log('[Generation] Lighting settings for image:', lightingSettingsText);
-        }
-      }
+          .filter((s) => s.length > 0)
+          .join(', '),
+      ].filter((s) => s.length > 0);
 
-      // Append camera and lighting settings to prompt if any
-      const settingsParts = [cameraSettingsText, lightingSettingsText].filter((s) => s.length > 0);
-      const enhancedPrompt = settingsParts.length > 0
+      let prompt = settingsParts.length > 0
         ? `${promptData.prompt}. ${settingsParts.join('. ')}`
         : promptData.prompt;
 
-      // Debug: Log connected nodes for model selection
-      console.log('[Generation] Connected nodes for image mode:', connectedNodes.map((n) => ({
-        id: n.id,
-        type: n.type,
-        outputType: n.type === 'output' ? (n.data as OutputNodeData).outputType : undefined,
-      })));
-
-      const modelInputs = connectedNodes.map((n) => ({
-        nodeId: n.id,
-        nodeType: n.type,
-        handleId: '',
-        tag: undefined, // No tags in image mode
-        outputType: n.type === 'output' ? (n.data as OutputNodeData).outputType : undefined,
-      }));
-
-      console.log('[Generation] Model selector inputs:', modelInputs);
-
-      const model = selectImageModel(modelInputs);
-      console.log('[Generation] Selected image model:', model);
-
-      // Collect all images from connected nodes (no distinction between types in image mode)
-      const imageUrls: string[] = [];
-
+      const nameTagMap = new Map<string, string>();
       for (const node of connectedNodes) {
-        if (node.type === 'image') {
-          const data = node.data as ImageNodeData;
-
-          // Check for upload error
-          if (data.uploadStatus === 'error') {
-            throw new Error(`Image "${data.fileName}" failed to upload: ${data.uploadError || 'Unknown error'}`);
-          }
-
-          // Use remoteUrl from background upload if available, otherwise upload on demand
-          let url: string | undefined;
-          if (data.remoteUrl) {
-            url = data.remoteUrl;
-            console.log('[Generation] Using pre-uploaded URL for image:', node.id);
-          } else if (data.file) {
-            console.log('[Generation] Uploading image on demand:', node.id);
-            url = await uploadFile(data.file);
-          } else {
-            url = data.imageUrl;
-          }
-          if (url) imageUrls.push(url);
-        } else if (node.type === 'element') {
-          const data = node.data as ElementNodeData;
-
-          // Check for upload errors
-          if (data.frontalUploadStatus === 'error') {
-            throw new Error(`Element "${data.name}" frontal image failed to upload: ${data.frontalUploadError || 'Unknown error'}`);
-          }
-          if (data.referenceUploadStatus === 'error') {
-            throw new Error(`Element "${data.name}" reference images failed to upload: ${data.referenceUploadError || 'Unknown error'}`);
-          }
-
-          // Use frontal image - remoteUrl first, then file, then url
-          if (data.frontalRemoteUrl) {
-            imageUrls.push(data.frontalRemoteUrl);
-            console.log('[Generation] Using pre-uploaded URL for element frontal:', node.id);
-          } else if (data.frontalFile) {
-            console.log('[Generation] Uploading element frontal on demand:', node.id);
-            imageUrls.push(await uploadFile(data.frontalFile));
-          } else if (data.frontalImageUrl) {
-            imageUrls.push(data.frontalImageUrl);
-          }
-
-          // Also add reference images - remoteUrls first, then files, then urls
-          if (data.referenceRemoteUrls && data.referenceRemoteUrls.length > 0) {
-            imageUrls.push(...data.referenceRemoteUrls);
-            console.log('[Generation] Using pre-uploaded URLs for element references:', node.id);
-          } else if (data.referenceFiles && data.referenceFiles.length > 0) {
-            console.log('[Generation] Uploading element references on demand:', node.id);
-            for (const file of data.referenceFiles) {
-              imageUrls.push(await uploadFile(file));
-            }
-          } else if (data.referenceImageUrls.length > 0) {
-            imageUrls.push(...data.referenceImageUrls);
-          }
-        } else if (node.type === 'output') {
-          // Handle output nodes as image input (regardless of role)
-          // If user connected it to prompt, they intend to use it as input
-          const data = node.data as OutputNodeData;
-          if (data.outputType === 'image' && data.imageUrl) {
-            imageUrls.push(data.imageUrl);
-            console.log('[Generation] Using output node image as input:', node.id);
-          }
+        if (node.type !== 'element') continue;
+        const data = node.data as ElementNodeData;
+        const elementTag = getEdgeTag(node.id, promptNodeId);
+        if (data.name && isValidNameForTag(data.name) && elementTag) {
+          nameTagMap.set(formatNameAsTag(data.name), elementTag);
         }
       }
+      if (nameTagMap.size > 0) prompt = translateNameTagsForApi(prompt, nameTagMap);
 
-      console.log('[Generation] Building image input for model:', model);
-      console.log('[Generation] Original Prompt:', promptData.prompt);
-      console.log('[Generation] Enhanced Prompt:', enhancedPrompt);
-      console.log('[Generation] Image URLs:', imageUrls.length);
+      return prompt;
+    },
+    [getEdgeTag]
+  );
 
-      if (model === 'fal-ai/nano-banana-pro/edit') {
-        // Image editing requires images
-        if (imageUrls.length === 0) {
-          throw new Error('At least one image is required for image editing');
-        }
+  /**
+   * Seedance 2.5 input. For reference-to-video, canvas tags are remapped to Seedance's
+   * positional tags: @ImageN → its index in image_urls, @ElementN → its frontal image's
+   * index (reference views appended and described), @VideoN → its index in video_urls.
+   */
+  const buildVideoInput = useCallback(
+    async (
+      promptNodeId: string,
+      promptData: PromptNodeData,
+      connectedNodes: NovaNode[],
+      model: VideoModel
+    ): Promise<VideoGenerationInput> => {
+      const prompt = buildPromptText(promptNodeId, promptData, connectedNodes);
 
-        // Log the actual image URLs being used
-        console.log('[Generation] Edit mode image URLs:', imageUrls);
-
-        // Build edit input with all parameters
-        // Use 'auto' aspect ratio to preserve input image dimensions
-        const input: NanoBananaImageEditInput = {
-          prompt: enhancedPrompt,
-          image_urls: imageUrls,
-          aspect_ratio: 'auto',
-          resolution: promptData.imageResolution,
-          output_format: 'png',
+      if (model === 'bytedance/seedance-2.5/us/text-to-video') {
+        const input: SeedanceTextToVideoInput = {
+          prompt,
+          duration: promptData.duration,
+          resolution: promptData.videoResolution,
+          aspect_ratio: promptData.aspectRatio,
+          generate_audio: promptData.generateAudio,
         };
-
-        console.log('[Generation] Edit input:', JSON.stringify(input, null, 2));
         return input;
       }
 
-      // Text-to-image
-      const input: NanoBananaTextToImageInput = {
-        prompt: enhancedPrompt,
-        aspect_ratio: promptData.imageAspectRatio,
-        resolution: promptData.imageResolution,
-        output_format: 'png',
+      if (model === 'bytedance/seedance-2.5/us/image-to-video') {
+        const frame = (role: ImageNodeData['role']) =>
+          connectedNodes.find((n) => n.type === 'image' && (n.data as ImageNodeData).role === role);
+        const startNode = frame('start_frame');
+        const endNode = frame('end_frame');
+        if (!startNode) {
+          throw new Error('Image-to-video needs a Start Frame image. Set an image\'s role to Start Frame.');
+        }
+        const input: SeedanceImageToVideoInput = {
+          image_url: await resolveImageUrl(startNode.data as ImageNodeData),
+          prompt,
+          duration: promptData.duration,
+          resolution: promptData.videoResolution,
+          generate_audio: promptData.generateAudio,
+        };
+        if (endNode) input.end_image_url = await resolveImageUrl(endNode.data as ImageNodeData);
+        return input;
+      }
+
+      // Reference-to-video
+      const taggedImages: Array<{ url: string; tag?: string }> = [];
+      const untaggedImages: string[] = [];
+      const elements: Array<{ tag?: string; label: string; kind: string; urls: string[] }> = [];
+      const videos: Array<{ url: string; tag?: string; seconds: number }> = [];
+
+      for (const node of connectedNodes) {
+        const tag = getEdgeTag(node.id, promptNodeId);
+        if (node.type === 'image') {
+          const url = await resolveImageUrl(node.data as ImageNodeData);
+          if (tag?.startsWith('@Image')) taggedImages.push({ url, tag });
+          else untaggedImages.push(url); // start/end frames act as plain references here
+        } else if (node.type === 'element') {
+          const data = node.data as ElementNodeData;
+          elements.push({
+            tag,
+            label: data.name || tag || 'the element',
+            kind: data.elementType,
+            urls: await resolveElementUrls(data),
+          });
+        } else if (node.type === 'video') {
+          const data = node.data as VideoNodeData;
+          videos.push({ url: await resolveVideoUrl(data), tag, seconds: data.duration || 0 });
+        } else if (node.type === 'output') {
+          const data = node.data as OutputNodeData;
+          if (data.role !== 'reference') continue;
+          if (data.outputType === 'image' && data.imageUrl) {
+            if (tag?.startsWith('@Image')) taggedImages.push({ url: data.imageUrl, tag });
+            else untaggedImages.push(data.imageUrl);
+          } else if (data.outputType === 'video' && data.videoUrl) {
+            videos.push({ url: data.videoUrl, tag, seconds: data.videoDuration || 0 });
+          }
+        }
+      }
+
+      const tagMap = new Map<string, string>();
+      const imageUrls: string[] = [];
+      const addImage = (url: string): number => {
+        imageUrls.push(url);
+        return imageUrls.length;
       };
+
+      taggedImages.sort((a, b) => tagIndex(a.tag) - tagIndex(b.tag));
+      for (const image of taggedImages) {
+        const position = addImage(image.url);
+        if (image.tag) tagMap.set(image.tag, `@Image${position}`);
+      }
+      for (const url of untaggedImages) addImage(url);
+
+      const elementNotes: string[] = [];
+      elements.sort((a, b) => tagIndex(a.tag) - tagIndex(b.tag));
+      for (const element of elements) {
+        const [frontal, ...views] = element.urls;
+        const frontalPosition = addImage(frontal);
+        if (element.tag) tagMap.set(element.tag, `@Image${frontalPosition}`);
+        if (views.length > 0) {
+          const viewTags = views.map((url) => `@Image${addImage(url)}`);
+          elementNotes.push(
+            `${viewTags.join(', ')} show${viewTags.length === 1 ? 's' : ''} the same ${element.kind} as @Image${frontalPosition} (${element.label}) from other angles.`
+          );
+        }
+      }
+
+      videos.sort((a, b) => tagIndex(a.tag) - tagIndex(b.tag));
+      videos.forEach((video, i) => {
+        if (video.tag) tagMap.set(video.tag, `@Video${i + 1}`);
+      });
+
+      if (imageUrls.length > SEEDANCE_MAX_IMAGES) {
+        throw new Error(`Seedance accepts up to ${SEEDANCE_MAX_IMAGES} reference images (elements count each view). You have ${imageUrls.length}.`);
+      }
+      if (videos.length > SEEDANCE_MAX_VIDEOS) {
+        throw new Error(`Seedance accepts up to ${SEEDANCE_MAX_VIDEOS} reference videos.`);
+      }
+      if (imageUrls.length + videos.length > SEEDANCE_MAX_FILES) {
+        throw new Error(`Seedance accepts up to ${SEEDANCE_MAX_FILES} reference files in total.`);
+      }
+      const knownVideoSeconds = videos.map((v) => v.seconds).filter((s) => s > 0);
+      if (knownVideoSeconds.some((s) => s < SEEDANCE_MIN_VIDEO_SECONDS || s > SEEDANCE_MAX_VIDEO_SECONDS)) {
+        throw new Error(`Each reference video must be ${SEEDANCE_MIN_VIDEO_SECONDS}–${SEEDANCE_MAX_VIDEO_SECONDS} seconds long.`);
+      }
+      if (knownVideoSeconds.reduce((a, b) => a + b, 0) > SEEDANCE_MAX_VIDEO_SECONDS) {
+        throw new Error(`Reference videos must total ${SEEDANCE_MAX_VIDEO_SECONDS} seconds or less.`);
+      }
+
+      // Single pass so remapped tags can never be remapped again
+      const remapped = prompt.replace(/@(?:Image|Element|Video)\d+\b/g, (tag) => tagMap.get(tag) ?? tag);
+      const finalPrompt = elementNotes.length > 0 ? `${remapped} ${elementNotes.join(' ')}` : remapped;
+
+      const editing = isVideoEdit(promptData.prompt, connectedNodes);
+      const input: SeedanceReferenceToVideoInput = {
+        prompt: finalPrompt,
+        task: editing ? 'editing' : 'reference',
+        resolution: promptData.videoResolution,
+        generate_audio: promptData.generateAudio,
+      };
+      if (imageUrls.length > 0) input.image_urls = imageUrls;
+      if (videos.length > 0) input.video_urls = videos.map((v) => v.url);
+      if (!editing) {
+        // 'editing' coerces both to auto, so they're only sent for 'reference'
+        input.duration = promptData.duration;
+        input.aspect_ratio = promptData.aspectRatio;
+      }
       return input;
     },
-    [getConnectedInputs]
+    [buildPromptText, getEdgeTag]
   );
 
   /**
-   * Start generation for a prompt node (video or image based on mode)
+   * GPT Image 2.6 input: explicit size for text-to-image, 'auto' (follow inputs) for edits.
+   */
+  const buildImageInput = useCallback(
+    async (
+      promptNodeId: string,
+      promptData: PromptNodeData,
+      connectedNodes: NovaNode[],
+      model: ImageModel
+    ): Promise<ImageGenerationInput> => {
+      const prompt = buildPromptText(promptNodeId, promptData, connectedNodes);
+
+      if (model === 'openai/gpt-image-2.6/sunburst/text-to-image') {
+        return {
+          prompt,
+          image_size: getGptImageSize(promptData.imageAspectRatio, promptData.imageResolution),
+          quality: 'high',
+          num_images: 1,
+          output_format: 'png',
+        };
+      }
+
+      const imageUrls: string[] = [];
+      for (const node of connectedNodes) {
+        if (node.type === 'image') {
+          imageUrls.push(await resolveImageUrl(node.data as ImageNodeData));
+        } else if (node.type === 'element') {
+          imageUrls.push(...(await resolveElementUrls(node.data as ElementNodeData)));
+        } else if (node.type === 'output') {
+          const data = node.data as OutputNodeData;
+          if (data.outputType === 'image' && data.imageUrl) imageUrls.push(data.imageUrl);
+        }
+      }
+
+      if (imageUrls.length === 0) throw new Error('At least one image is required for image editing');
+      if (imageUrls.length > GPT_IMAGE_MAX_INPUTS) {
+        throw new Error(`Image editing accepts up to ${GPT_IMAGE_MAX_INPUTS} input images. You have ${imageUrls.length}.`);
+      }
+
+      return {
+        prompt,
+        image_urls: imageUrls,
+        image_size: 'auto',
+        quality: 'high',
+        num_images: 1,
+        output_format: 'png',
+      };
+    },
+    [buildPromptText]
+  );
+
+  /**
+   * LTX 2.5 audio-to-video input. First frame: an image wired into the Audio node,
+   * otherwise a Start Frame image connected to the prompt. Prompt is optional with an image.
+   */
+  const buildAudioToVideoInput = useCallback(
+    async (
+      promptNodeId: string,
+      promptData: PromptNodeData,
+      connectedNodes: NovaNode[],
+      model: AudioToVideoModel
+    ): Promise<{ input: LtxAudioToVideoInput; audioSeconds: number }> => {
+      const audioNode = getAudioSource(connectedNodes);
+      if (!audioNode) throw new Error('Connect an Audio node with a file for audio-to-video');
+      const audioData = audioNode.data as AudioNodeData;
+
+      const audioSeconds = audioData.duration || 0;
+      const maxSeconds = model === 'lightricks/ltx-2.5/audio-to-video/fast'
+        ? LTX_A2V_MAX_AUDIO_SECONDS.fast
+        : LTX_A2V_MAX_AUDIO_SECONDS.pro;
+      if (audioSeconds > 0 && (audioSeconds < LTX_A2V_MIN_AUDIO_SECONDS || audioSeconds > maxSeconds)) {
+        throw new Error(`Audio must be ${LTX_A2V_MIN_AUDIO_SECONDS}–${LTX_A2V_MAX_AUDIO_SECONDS.fast} seconds for audio-to-video (this clip is ${audioSeconds.toFixed(1)}s).`);
+      }
+
+      const { nodes: allNodes, edges: allEdges } = useCanvasStore.getState();
+      const upstreamImage = allEdges
+        .filter((e) => e.target === audioNode.id)
+        .map((e) => allNodes.find((n) => n.id === e.source))
+        .find((n): n is NovaNode =>
+          Boolean(n) &&
+          (n!.type === 'image' || (n!.type === 'output' && (n!.data as OutputNodeData).outputType === 'image'))
+        );
+      const firstFrameNode =
+        upstreamImage ??
+        connectedNodes.find((n) => n.type === 'image' && (n.data as ImageNodeData).role === 'start_frame');
+
+      let imageUrl: string | undefined;
+      if (firstFrameNode?.type === 'image') imageUrl = await resolveImageUrl(firstFrameNode.data as ImageNodeData);
+      else if (firstFrameNode?.type === 'output') imageUrl = (firstFrameNode.data as OutputNodeData).imageUrl;
+
+      const prompt = buildPromptText(promptNodeId, promptData, connectedNodes).trim();
+      if (!imageUrl && !prompt) throw new Error('Add a prompt or connect a first-frame image for audio-to-video');
+
+      const input: LtxAudioToVideoInput = {
+        audio_url: await resolveAudioUrl(audioData),
+        aspect_ratio: promptData.aspectRatio === '16:9' || promptData.aspectRatio === '9:16' ? promptData.aspectRatio : 'auto',
+      };
+      if (imageUrl) input.image_url = imageUrl;
+      if (prompt) input.prompt = prompt;
+      return { input, audioSeconds };
+    },
+    [buildPromptText]
+  );
+
+  /**
+   * Place the result: fill the chain placeholder if this prompt is a chain step,
+   * otherwise create an output node wired to the prompt. Then persist to R2.
+   */
+  const deliverOutput = useCallback(
+    (promptNode: NovaNode, promptData: PromptNodeData, output: OutputPayload) => {
+      const isVideo = output.outputType === 'video';
+      const nodeData = {
+        outputType: output.outputType,
+        ...(isVideo
+          ? { videoUrl: output.url, thumbnailUrl: '', videoDuration: output.videoDuration }
+          : { imageUrl: output.url, thumbnailUrl: output.url }),
+        dimensions: output.dimensions,
+        role: 'output' as const,
+        canChain: isVideo,
+        generationMetadata: output.metadata,
+      };
+      const persistUrls = isVideo ? { videoUrl: output.url } : { imageUrl: output.url };
+
+      const chainStepInfo = promptData.chainId
+        ? useChainStore.getState().getStepForPrompt(promptNode.id)
+        : null;
+
+      if (chainStepInfo) {
+        updateNode(chainStepInfo.step.placeholderOutputId, { ...nodeData, isPlaceholder: false });
+        persistOutputToR2(chainStepInfo.step.placeholderOutputId, persistUrls);
+        useChainStore.getState().setStepStatus(chainStepInfo.chain.id, chainStepInfo.stepIndex, 'awaiting_validation');
+        return;
+      }
+
+      const outputNode = createNode(
+        'output',
+        { x: promptNode.position.x + 400, y: promptNode.position.y },
+        nodeData
+      );
+      addNode(outputNode);
+      addEdge({
+        id: `edge-${nanoid()}`,
+        source: promptNode.id,
+        target: outputNode.id,
+        sourceHandle: 'output',
+        targetHandle: 'input',
+      });
+      persistOutputToR2(outputNode.id, persistUrls);
+    },
+    [updateNode, addNode, addEdge, persistOutputToR2]
+  );
+
+  /**
+   * Start generation for a prompt node
    */
   const startGeneration = useCallback(
     async (promptNodeId: string) => {
-      const promptNode = nodes.find((n) => n.id === promptNodeId);
+      const promptNode = useCanvasStore.getState().nodes.find((n) => n.id === promptNodeId);
       if (!promptNode || promptNode.type !== 'prompt') {
         throw new Error('Invalid prompt node');
       }
 
       const promptData = promptNode.data as PromptNodeData;
       const connectedNodes = getConnectedInputs(promptNodeId);
-      const isImageMode = promptData.mode === 'image';
 
-      // Log the prompt data for debugging
-      console.log('[Generation] Starting generation for node:', promptNodeId);
-      console.log('[Generation] Mode:', promptData.mode);
-      console.log('[Generation] Prompt text:', promptData.prompt);
-      console.log('[Generation] Connected nodes:', connectedNodes.length);
-
-      // Validate prompt
-      if (!promptData.prompt.trim()) {
+      if (!promptData.prompt.trim() && !getAudioSource(connectedNodes)) {
         throw new Error('Prompt is empty');
       }
 
-      // Mode-specific validation
-      if (isImageMode) {
-        // Image mode: just needs a prompt
-        // Connected images are optional (for editing)
-      } else {
-        // Video mode: requires connected nodes
-        if (connectedNodes.length === 0) {
-          throw new Error('No inputs connected to prompt node');
-        }
-
-        // Validate tags in prompt (video mode only)
+      // Validate @tags against connections (video mode only)
+      if (promptData.mode === 'video' && connectedNodes.length > 0) {
         const usedTags = connectedNodes
           .map((n) => getEdgeTag(n.id, promptNodeId))
           .filter(Boolean) as string[];
-
-        const tagValidation = validateTags(promptData.prompt, usedTags);
+        const nameTagToElementTag = new Map<string, string>();
+        for (const node of connectedNodes) {
+          if (node.type !== 'element') continue;
+          const data = node.data as ElementNodeData;
+          const elementTag = getEdgeTag(node.id, promptNodeId);
+          if (data.name && isValidNameForTag(data.name) && elementTag) {
+            nameTagToElementTag.set(formatNameAsTag(data.name), elementTag);
+          }
+        }
+        const tagValidation = validateAllTags(promptData.prompt, usedTags, nameTagToElementTag);
         if (!tagValidation.valid) {
-          throw new Error(
-            `Missing connections for tags: ${tagValidation.missing.join(', ')}`
-          );
+          throw new Error(`Missing connections for tags: ${tagValidation.missing.join(', ')}`);
         }
       }
 
-      // Determine model based on mode
-      let model: KlingModel | NanoBananaModel;
-      if (isImageMode) {
-        model = selectImageModel(
-          connectedNodes.map((n) => ({
-            nodeId: n.id,
-            nodeType: n.type,
-            handleId: '',
-            tag: undefined,
-            // Include outputType for output nodes so model selector can detect image inputs
-            outputType: n.type === 'output' ? (n.data as OutputNodeData).outputType : undefined,
-          }))
-        );
-      } else {
-        model = selectModel(
-          connectedNodes.map((n) => ({
-            nodeId: n.id,
-            nodeType: n.type,
-            handleId: '',
-            tag: getEdgeTag(n.id, promptNodeId),
-            // Include outputType for output nodes so model selector can detect video/image inputs
-            outputType: n.type === 'output' ? (n.data as OutputNodeData).outputType : undefined,
-            // Include role for image nodes so model selector can detect reference vs start/end frames
-            role: n.type === 'image' ? (n.data as ImageNodeData).role : undefined,
-          })),
-          promptData.prompt
-        );
-      }
+      const plan = planGeneration(promptData, connectedNodes);
 
-      // Update prompt node status IMMEDIATELY to show loading feedback
-      // Clear any previous error when starting a new generation
       updateNode(promptNodeId, {
         status: 'generating',
         progress: 0,
-        selectedModel: model,
+        selectedModel: plan.model,
         error: undefined,
       });
 
-      // Create request ID early for error tracking
       const requestId = nanoid();
+      const onQueueUpdate = (update: { status: string }) => {
+        if (update.status === 'IN_PROGRESS') {
+          updateNode(promptNodeId, { status: 'generating', progress: 50 });
+        }
+      };
 
       try {
-        // Wait for any pending background uploads to complete before building API input
-        // This ensures all remoteUrls are populated in node data
         await waitForPendingUploads(connectedNodes);
+        // Re-read connected nodes so background-upload remoteUrls are present
+        const readyNodes = getConnectedInputs(promptNodeId);
+        assertNoUploadErrors(readyNodes);
 
-        // Re-fetch connected nodes to get updated data with remoteUrls
-        const updatedConnectedNodes = getConnectedInputs(promptNodeId);
-
-        // Check for any upload errors after waiting
-        for (const node of updatedConnectedNodes) {
-          if (node.type === 'image') {
-            const data = node.data as ImageNodeData;
-            if (data.uploadStatus === 'error') {
-              throw new Error(`Image "${data.fileName}" failed to upload: ${data.uploadError || 'Unknown error'}`);
-            }
-          } else if (node.type === 'video') {
-            const data = node.data as VideoNodeData;
-            if (data.uploadStatus === 'error') {
-              throw new Error(`Video "${data.fileName}" failed to upload: ${data.uploadError || 'Unknown error'}`);
-            }
-          } else if (node.type === 'element') {
-            const data = node.data as ElementNodeData;
-            if (data.frontalUploadStatus === 'error') {
-              throw new Error(`Element "${data.name}" frontal image failed to upload: ${data.frontalUploadError || 'Unknown error'}`);
-            }
-            if (data.referenceUploadStatus === 'error') {
-              throw new Error(`Element "${data.name}" reference images failed to upload: ${data.referenceUploadError || 'Unknown error'}`);
-            }
-          }
+        // Bring-your-own-key: generation runs on the user's fal.ai account
+        if (!useSettingsStore.getState().falApiKey) {
+          throw new Error(FAL_KEY_REQUIRED_MESSAGE);
         }
 
-        if (isImageMode) {
-          // IMAGE GENERATION
-          const input = await buildImageApiInput(promptNodeId, promptData);
+        const baseMetadata = {
+          promptUsed: promptData.prompt,
+          modelUsed: plan.model,
+          inputNodes: connectedNodes.map((n) => n.id),
+          createdAt: new Date(),
+          cost: plan.costUsd,
+          costBreakdown: plan.breakdown,
+          costIsEstimate: plan.isEstimate,
+        };
 
-          // Add to queue
-          addToQueue({
-            id: requestId,
-            promptNodeId,
-            model,
-            input,
-          });
+        let output: OutputPayload;
+        let falRequestId: string | undefined;
+        let videoFile: { url: string; fileSize: number; fileName: string; contentType: string } | undefined;
 
-          // Start generation
-          setActiveGeneration({
-            id: requestId,
-            promptNodeId,
-            model,
-            input,
-            status: 'processing',
-            createdAt: new Date(),
-          });
+        if (plan.kind === 'image') {
+          const model = plan.model as ImageModel;
+          const input = await buildImageInput(promptNodeId, promptData, readyNodes, model);
+          addToQueue({ id: requestId, promptNodeId, model, input });
+          setActiveGeneration({ id: requestId, promptNodeId, model, input, status: 'processing', createdAt: new Date() });
 
-          const result = await generateImage({
-            model: model as NanoBananaModel,
-            input,
-            onQueueUpdate: (update) => {
-              if (update.status === 'IN_PROGRESS') {
-                updateNode(promptNodeId, {
-                  status: 'generating',
-                  progress: 50,
-                });
-              }
-            },
-          });
+          const result = await generateImage({ model, input, onQueueUpdate });
+          const image = result.data?.images[0];
+          if (!result.success || !image) throw new Error(result.error || 'Image generation failed');
 
-          if (result.success && result.data && result.data.images.length > 0) {
-            const generatedImage = result.data.images[0];
-            const cost = calculateImageCost(model as NanoBananaModel, promptData.imageResolution);
-
-            // Create output node for image
-            const promptNodePosition = promptNode.position;
-            const outputPosition = {
-              x: promptNodePosition.x + 400,
-              y: promptNodePosition.y,
-            };
-
-            const outputNode = createNode('output', outputPosition, {
-              outputType: 'image',
-              imageUrl: generatedImage.url,
-              thumbnailUrl: generatedImage.url,
-              dimensions: { width: generatedImage.width, height: generatedImage.height },
-              role: 'output',
-              canChain: false, // Images can't be chained for video
-              generationMetadata: {
-                promptUsed: promptData.prompt,
-                modelUsed: model,
-                inputNodes: connectedNodes.map((n) => n.id),
-                aspectRatio: promptData.imageAspectRatio,
-                resolution: promptData.imageResolution,
-                createdAt: new Date(),
-                requestId: result.requestId || requestId,
-                cost,
-              },
-            });
-
-            addNode(outputNode);
-
-            // Connect prompt to output
-            addEdge({
-              id: `edge-${nanoid()}`,
-              source: promptNodeId,
-              target: outputNode.id,
-              sourceHandle: 'output',
-              targetHandle: 'input',
-            });
-
-            // Update prompt node status
-            updateNode(promptNodeId, {
-              status: 'completed',
-              progress: 100,
-            });
-
-            completeGeneration(requestId, {
-              success: true,
+          const requested = 'image_urls' in input
+            ? null
+            : getGptImageSize(promptData.imageAspectRatio, promptData.imageResolution);
+          const width = image.width ?? requested?.width ?? 0;
+          const height = image.height ?? requested?.height ?? 0;
+          // Price the image fal actually rendered (edits follow the inputs' size)
+          const actualCost = width > 0 && height > 0 ? estimateImageCostFromPixels(width, height) : null;
+          falRequestId = result.requestId;
+          output = {
+            outputType: 'image',
+            url: image.url,
+            dimensions: { width, height },
+            metadata: {
+              ...baseMetadata,
+              ...(actualCost && {
+                cost: actualCost.costUsd,
+                costBreakdown: actualCost.breakdown,
+                costIsEstimate: actualCost.isEstimate,
+              }),
+              aspectRatio: 'image_urls' in input ? 'auto' : promptData.imageAspectRatio,
+              resolution: promptData.imageResolution,
               requestId: result.requestId || requestId,
-            });
-          } else {
-            throw new Error(result.error || 'Image generation failed');
-          }
+            },
+          };
+        } else if (plan.kind === 'audio-to-video') {
+          const model = plan.model as AudioToVideoModel;
+          const { input, audioSeconds } = await buildAudioToVideoInput(promptNodeId, promptData, readyNodes, model);
+          addToQueue({ id: requestId, promptNodeId, model, input });
+          setActiveGeneration({ id: requestId, promptNodeId, model, input, status: 'processing', createdAt: new Date() });
+
+          const result = await generateAudioToVideo({ model, input, onQueueUpdate });
+          const video = result.data?.video;
+          if (!result.success || !video) throw new Error(result.error || 'Audio-to-video generation failed: no video returned');
+
+          const duration = video.duration ?? audioSeconds;
+          // Billed on the input audio length
+          const actualCost = audioSeconds > 0 ? estimateAudioToVideoCost(model, audioSeconds) : null;
+          falRequestId = result.requestId;
+          videoFile = {
+            url: video.url,
+            fileSize: video.file_size ?? 0,
+            fileName: video.file_name ?? 'ltx-video.mp4',
+            contentType: video.content_type ?? 'video/mp4',
+          };
+          output = {
+            outputType: 'video',
+            url: video.url,
+            videoDuration: duration,
+            dimensions: { width: video.width ?? 1920, height: video.height ?? 1080 },
+            metadata: {
+              ...baseMetadata,
+              ...(actualCost && {
+                cost: actualCost.costUsd,
+                costBreakdown: actualCost.breakdown,
+                costIsEstimate: actualCost.isEstimate,
+              }),
+              duration,
+              aspectRatio: input.aspect_ratio ?? 'auto',
+              requestId: result.requestId || requestId,
+            },
+          };
         } else {
-          // VIDEO GENERATION
-          const input = await buildApiInput(promptNodeId, promptData);
+          const model = plan.model as VideoModel;
+          const input = await buildVideoInput(promptNodeId, promptData, readyNodes, model);
+          addToQueue({ id: requestId, promptNodeId, model, input });
+          setActiveGeneration({ id: requestId, promptNodeId, model, input, status: 'processing', createdAt: new Date() });
 
-          // Add to queue
-          addToQueue({
-            id: requestId,
-            promptNodeId,
-            model,
-            input,
-          });
+          const result = await generateVideo({ model, input, onQueueUpdate });
+          const video = result.data?.video;
+          if (!result.success || !video) throw new Error(result.error || 'Video generation failed');
 
-          // Start generation
-          setActiveGeneration({
-            id: requestId,
-            promptNodeId,
-            model,
-            input,
-            status: 'processing',
-            createdAt: new Date(),
-          });
-
-          const result = await generateVideo({
-            model: model as KlingModel,
-            input: input as KlingInput,
-            onQueueUpdate: (update) => {
-              if (update.status === 'IN_PROGRESS') {
-                updateNode(promptNodeId, {
-                  status: 'generating',
-                  progress: 50,
-                });
-              }
-            },
-          });
-
-          if (result.success && result.data) {
-            const durationSeconds = parseInt(promptData.duration, 10);
-            const cost = calculateCost(model as KlingModel, durationSeconds);
-
-            // Create output node for video
-            const promptNodePosition = promptNode.position;
-            const outputPosition = {
-              x: promptNodePosition.x + 400,
-              y: promptNodePosition.y,
-            };
-
-            const outputNode = createNode('output', outputPosition, {
-              outputType: 'video',
-              videoUrl: result.data.video.url,
-              thumbnailUrl: '',
-              videoDuration: durationSeconds,
-              dimensions: { width: 1920, height: 1080 },
-              role: 'output',
-              canChain: true,
-              generationMetadata: {
-                promptUsed: promptData.prompt,
-                modelUsed: model,
-                inputNodes: connectedNodes.map((n) => n.id),
-                duration: durationSeconds,
-                aspectRatio: promptData.aspectRatio,
-                createdAt: new Date(),
-                requestId: result.requestId || requestId,
-                cost,
-              },
-            });
-
-            addNode(outputNode);
-
-            // Connect prompt to output
-            addEdge({
-              id: `edge-${nanoid()}`,
-              source: promptNodeId,
-              target: outputNode.id,
-              sourceHandle: 'output',
-              targetHandle: 'input',
-            });
-
-            // Update prompt node status
-            updateNode(promptNodeId, {
-              status: 'completed',
-              progress: 100,
-            });
-
-            completeGeneration(requestId, {
-              success: true,
-              video: {
-                url: result.data.video.url,
-                fileSize: result.data.video.file_size,
-                fileName: result.data.video.file_name,
-                contentType: result.data.video.content_type,
-              },
+          const isEditTask = 'task' in input && input.task === 'editing';
+          const duration = isEditTask
+            ? getReferenceVideoSeconds(readyNodes) || parseInt(promptData.duration, 10)
+            : parseInt(promptData.duration, 10);
+          // Image-to-video and edits follow the source's framing
+          const aspectRatio = model === 'bytedance/seedance-2.5/us/image-to-video' || isEditTask
+            ? 'auto'
+            : promptData.aspectRatio;
+          falRequestId = result.requestId;
+          videoFile = {
+            url: video.url,
+            fileSize: video.file_size ?? 0,
+            fileName: video.file_name ?? 'seedance-video.mp4',
+            contentType: video.content_type ?? 'video/mp4',
+          };
+          output = {
+            outputType: 'video',
+            url: video.url,
+            videoDuration: duration,
+            dimensions: videoDimensions(promptData.videoResolution, aspectRatio === 'auto' ? '16:9' : aspectRatio),
+            metadata: {
+              ...baseMetadata,
+              duration,
+              aspectRatio,
+              resolution: promptData.videoResolution,
+              generateAudio: promptData.generateAudio,
               requestId: result.requestId || requestId,
-            });
-          } else {
-            throw new Error(result.error || 'Video generation failed');
-          }
+            },
+          };
         }
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : 'Unknown error';
 
-        updateNode(promptNodeId, {
-          status: 'error',
-          error: errorMessage,
+        deliverOutput(promptNode, promptData, output);
+        updateNode(promptNodeId, { status: 'completed', progress: 100 });
+        completeGeneration(requestId, {
+          success: true,
+          video: videoFile,
+          requestId: falRequestId || requestId,
         });
 
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        updateNode(promptNodeId, { status: 'error', error: errorMessage });
         failGeneration(requestId, errorMessage);
       }
     },
     [
-      nodes,
       getConnectedInputs,
-      buildApiInput,
-      buildImageApiInput,
+      getEdgeTag,
+      buildVideoInput,
+      buildImageInput,
+      buildAudioToVideoInput,
+      deliverOutput,
       updateNode,
       addToQueue,
       setActiveGeneration,
       completeGeneration,
       failGeneration,
-      addNode,
-      addEdge,
     ]
   );
 
   /**
-   * Get estimated cost for generation
+   * Estimated fal.ai cost (USD) and model label for a prompt node
    */
   const getEstimatedCost = useCallback(
-    (promptNodeId: string): { cost: number; model: string } | null => {
-      const promptNode = nodes.find((n) => n.id === promptNodeId);
+    (promptNodeId: string): { cost: number; breakdown: string; model: string } | null => {
+      const promptNode = useCanvasStore.getState().nodes.find((n) => n.id === promptNodeId);
       if (!promptNode || promptNode.type !== 'prompt') return null;
-
-      const promptData = promptNode.data as PromptNodeData;
-      const connectedNodes = getConnectedInputs(promptNodeId);
-
-      if (connectedNodes.length === 0) return null;
-
-      try {
-        const model = selectModel(
-          connectedNodes.map((n) => ({
-            nodeId: n.id,
-            nodeType: n.type,
-            handleId: '',
-            tag: getEdgeTag(n.id, promptNodeId),
-            // Include outputType for output nodes so model selector can detect video/image inputs
-            outputType: n.type === 'output' ? (n.data as OutputNodeData).outputType : undefined,
-            // Include role for image nodes so model selector can detect reference vs start/end frames
-            role: n.type === 'image' ? (n.data as ImageNodeData).role : undefined,
-          })),
-          promptData.prompt
-        );
-
-        const durationSeconds = parseInt(promptData.duration, 10);
-        const cost = calculateCost(model, durationSeconds);
-
-        return {
-          cost,
-          model: getModelDisplayName(model),
-        };
-      } catch {
-        return null;
-      }
+      const plan = planGeneration(promptNode.data as PromptNodeData, getConnectedInputs(promptNodeId));
+      return { cost: plan.costUsd, breakdown: plan.breakdown, model: getModelDisplayName(plan.model) };
     },
-    [nodes, getConnectedInputs, getEdgeTag]
+    [getConnectedInputs]
   );
 
   return {
     startGeneration,
     getEstimatedCost,
-    isGenerating,
   };
 }

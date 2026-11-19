@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { FileRoleModalState, MediaRole, ElementType } from '@/types';
+import type { FileRoleModalState } from '@/types';
 
 export interface MediaViewerState {
   isOpen: boolean;
@@ -19,6 +19,18 @@ export interface OpenMediaViewerOptions {
 export interface ElementConfigModalState {
   isOpen: boolean;
   position: { x: number; y: number };
+}
+
+export interface BoardLoadModalState {
+  isOpen: boolean;
+  boardId: string | null;
+  boardName: string;
+}
+
+export interface ShareModalState {
+  isOpen: boolean;
+  boardId: string | null;
+  boardName: string;
 }
 
 interface ModalState {
@@ -50,6 +62,16 @@ interface ModalState {
   elementConfigModal: ElementConfigModalState;
   openElementConfigModal: (position: { x: number; y: number }) => void;
   closeElementConfigModal: () => void;
+
+  // Board Load Modal
+  boardLoadModal: BoardLoadModalState;
+  openBoardLoadModal: (boardId: string, boardName: string) => void;
+  closeBoardLoadModal: () => void;
+
+  // Share Modal
+  shareModal: ShareModalState;
+  openShareModal: (boardId: string, boardName: string) => void;
+  closeShareModal: () => void;
 }
 
 const initialFileRoleModal: FileRoleModalState = {
@@ -67,15 +89,21 @@ export const useModalStore = create<ModalState>((set) => ({
 
   openFileRoleModal: (file, fileType, dropPosition, targetNodeId) => {
     const previewUrl = URL.createObjectURL(file);
-    set({
-      fileRoleModal: {
-        isOpen: true,
-        file,
-        fileType,
-        previewUrl,
-        dropPosition,
-        targetNodeId,
-      },
+    set((state) => {
+      // Revoke any existing preview URL before creating a new one
+      if (state.fileRoleModal.previewUrl) {
+        URL.revokeObjectURL(state.fileRoleModal.previewUrl);
+      }
+      return {
+        fileRoleModal: {
+          isOpen: true,
+          file,
+          fileType,
+          previewUrl,
+          dropPosition,
+          targetNodeId,
+        },
+      };
     });
   },
 
@@ -172,6 +200,60 @@ export const useModalStore = create<ModalState>((set) => ({
       elementConfigModal: {
         isOpen: false,
         position: { x: 0, y: 0 },
+      },
+    });
+  },
+
+  // Board Load Modal
+  boardLoadModal: {
+    isOpen: false,
+    boardId: null,
+    boardName: '',
+  },
+
+  openBoardLoadModal: (boardId, boardName) => {
+    set({
+      boardLoadModal: {
+        isOpen: true,
+        boardId,
+        boardName,
+      },
+    });
+  },
+
+  closeBoardLoadModal: () => {
+    set({
+      boardLoadModal: {
+        isOpen: false,
+        boardId: null,
+        boardName: '',
+      },
+    });
+  },
+
+  // Share Modal
+  shareModal: {
+    isOpen: false,
+    boardId: null,
+    boardName: '',
+  },
+
+  openShareModal: (boardId, boardName) => {
+    set({
+      shareModal: {
+        isOpen: true,
+        boardId,
+        boardName,
+      },
+    });
+  },
+
+  closeShareModal: () => {
+    set({
+      shareModal: {
+        isOpen: false,
+        boardId: null,
+        boardName: '',
       },
     });
   },

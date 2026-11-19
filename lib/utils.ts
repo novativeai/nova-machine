@@ -43,7 +43,8 @@ export function formatCost(cost: number): string {
 /**
  * Debounce function
  */
-export function debounce<T extends (...args: unknown[]) => unknown>(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function debounce<T extends (...args: any[]) => any>(
   func: T,
   wait: number
 ): (...args: Parameters<T>) => void {
@@ -53,6 +54,50 @@ export function debounce<T extends (...args: unknown[]) => unknown>(
     if (timeout) clearTimeout(timeout);
     timeout = setTimeout(() => func(...args), wait);
   };
+}
+
+/**
+ * Throttle function - limits execution to at most once per wait period
+ * Returns a throttled function with a cancel method for cleanup
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function throttle<T extends (...args: any[]) => any>(
+  func: T,
+  wait: number
+): ((...args: Parameters<T>) => void) & { cancel: () => void } {
+  let timeout: NodeJS.Timeout | null = null;
+  let lastRan: number | null = null;
+
+  const throttled = (...args: Parameters<T>) => {
+    const now = Date.now();
+
+    if (!lastRan) {
+      func(...args);
+      lastRan = now;
+    } else {
+      if (timeout) clearTimeout(timeout);
+
+      timeout = setTimeout(
+        () => {
+          if (now - (lastRan || 0) >= wait) {
+            func(...args);
+            lastRan = Date.now();
+          }
+        },
+        wait - (now - lastRan)
+      );
+    }
+  };
+
+  throttled.cancel = () => {
+    if (timeout) {
+      clearTimeout(timeout);
+      timeout = null;
+    }
+    lastRan = null;
+  };
+
+  return throttled;
 }
 
 /**
