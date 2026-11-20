@@ -7,7 +7,7 @@ import { cn } from '@/lib/utils';
 import { useCanvasStore, useAssetStore, createNode } from '@/stores';
 import { useCharacterGeneration } from '@/hooks';
 import type { ImageNodeData, OutputNodeData, ElementNodeData } from '@/types';
-import { generateCharacterViews, generateImage, getGptImageSize } from '@/lib/fal';
+import { generateCharacterViews, generateImage, getGptImageSize, turnaroundCost } from '@/lib/fal';
 
 type MenuType = 'character' | 'scene' | null;
 
@@ -170,6 +170,22 @@ export function FloatingToolbar() {
           generatedReferenceUrls: viewUrls,
           generatedReferenceThumbnails: viewUrls,
           generatedReferenceLabels: views.map((v) => v.view),
+          generationMetadata: {
+            promptUsed: characterPrompt.trim(),
+            modelUsed: 'openai/gpt-image-2.6/sunburst/edit',
+            modelLabel: 'GPT Image 2.6',
+            category: 'image',
+            inputNodes: [],
+            aspectRatio: '3:4',
+            createdAt: new Date(),
+            requestId: '',
+            ...(() => {
+              const views4 = turnaroundCost(views);
+              const frontal = frontalResult.data?.images[0];
+              const frontalCost = frontal?.width && frontal.height ? (frontal.width * frontal.height / 1_000_000) * 0.19 : 0;
+              return { cost: views4.cost + frontalCost, costBreakdown: `frontal + ${views4.breakdown}`, costIsEstimate: true };
+            })(),
+          },
           referenceImageUrls: viewUrls,
           referenceThumbnails: viewUrls,
           referenceRemoteUrls: viewUrls,

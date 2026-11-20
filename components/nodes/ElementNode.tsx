@@ -6,7 +6,7 @@ import { User, X, Plus, Upload, Box, AlertTriangle, Loader2, Lock, RotateCw, Spa
 import type { ElementNodeData } from '@/types';
 import { useCanvasStore } from '@/stores';
 import { cn } from '@/lib/utils';
-import { getTagColor, isValidNameForTag, formatNameAsTag } from '@/lib/fal';
+import { formatUsd, getTagColor, isValidNameForTag, formatNameAsTag } from '@/lib/fal';
 import { HashtagBadges } from './HashtagBadges';
 import { useCharacterGeneration } from '@/hooks/useCharacterGeneration';
 import { useSettingsStore } from '@/stores';
@@ -439,7 +439,15 @@ function ElementNodeComponent({ id, data, selected }: ElementNodeProps) {
       {/* Identity: turnaround + appearance lock (sent with every prompt that casts this character) */}
       <div className="nodrag mt-3 space-y-2 border-t border-white/5 pt-2" onMouseDown={(e) => e.stopPropagation()}>
         {hasTurnaround && (
-          <div className="flex flex-wrap gap-1">
+          <div className="flex flex-wrap items-center gap-1">
+            {data.generationMetadata && (
+              <span
+                className="rounded bg-white/5 px-1.5 py-0.5 text-[9px] text-white/60"
+                title={`${data.generationMetadata.costBreakdown ?? ''} · billed by fal.ai to your account`}
+              >
+                ~{formatUsd(data.generationMetadata.cost)}
+              </span>
+            )}
             {generatedLabels.map((label) => (
               <span key={label} className="rounded bg-white/5 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-white/45">
                 {label}

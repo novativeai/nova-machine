@@ -214,6 +214,19 @@ interface OutputPayload {
   metadata: GenerationMetadata;
 }
 
+/** Below the prompt's lowest existing result, so new takes never land on top of old ones. */
+function nextResultPosition(promptNode: NovaNode, offset: { x: number; y: number }): { x: number; y: number } {
+  const { nodes, edges } = useCanvasStore.getState();
+  const results = edges
+    .filter((e) => e.source === promptNode.id)
+    .map((e) => nodes.find((n) => n.id === e.target))
+    .filter((n): n is NovaNode => Boolean(n) && (n!.type === 'output' || n!.type === 'audio'));
+  const x = promptNode.position.x + offset.x;
+  if (results.length === 0) return { x, y: promptNode.position.y + offset.y };
+  const bottom = Math.max(...results.map((n) => n.position.y + (n.measured?.height ?? 360)));
+  return { x, y: bottom + 32 };
+}
+
 /** Length of a remote audio file from its metadata (0 if it can't be read). */
 function probeRemoteAudio(url: string): Promise<number> {
   return new Promise((resolve) => {
@@ -358,7 +371,7 @@ export function useGeneration() {
         elements,
         videos: videos.filter((v) => v.url),
       };
-      if (shape.startFrame) media.startFrame = await resolveImageUrl(shape.startFrame.data as ImageNodeData);
+      if (shape.startFrame) media.startFrame = await nodeMediaUrl(shape.startFrame);
       if (shape.endFrame) media.endFrame = await resolveImageUrl(shape.endFrame.data as ImageNodeData);
 
       if (shape.audio) {
@@ -413,11 +426,7 @@ export function useGeneration() {
         return;
       }
 
-      const outputNode = createNode(
-        'output',
-        { x: promptNode.position.x + offset.x, y: promptNode.position.y + offset.y },
-        nodeData
-      );
+      const outputNode = createNode('output', nextResultPosition(promptNode, offset), nodeData);
       addNode(outputNode);
       addEdge({
         id: `edge-${nanoid()}`,
@@ -615,7 +624,7 @@ export function useGeneration() {
           const extension = audio.content_type?.includes('wav') ? 'wav' : 'mp3';
           const audioNode = createNode(
             'audio',
-            { x: promptNode.position.x + 400, y: promptNode.position.y },
+            nextResultPosition(promptNode, { x: 400, y: 0 }),
             {
               audioUrl: audio.url,
               remoteUrl: audio.url,

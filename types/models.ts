@@ -67,6 +67,8 @@ export type AudioEndpoint =
 
 export type UtilityEndpoint =
   | 'fal-ai/ffmpeg-api/compose'
+  | 'fal-ai/ffmpeg-api/merge-videos'
+  | 'fal-ai/ffmpeg-api/merge-audio-video'
   | 'fal-ai/ffmpeg-api/images-to-video'
   | 'fal-ai/workflow-utilities/trim-video';
 

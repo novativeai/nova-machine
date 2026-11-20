@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { fetchMediaBytes } from '@/lib/media/fetch-media';
 
 const PEAK_BUCKETS = 2000;
 const cache = new Map<string, Float32Array>();
@@ -9,9 +10,7 @@ const inflight = new Map<string, Promise<Float32Array | null>>();
 /** Normalised peak envelope of an audio (or video) file, decoded once per URL. */
 async function decodePeaks(url: string): Promise<Float32Array | null> {
   try {
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    const buffer = await response.arrayBuffer();
+    const buffer = await fetchMediaBytes(url);
     const AudioCtx = window.AudioContext;
     const ctx = new AudioCtx();
     try {
@@ -33,7 +32,7 @@ async function decodePeaks(url: string): Promise<Float32Array | null> {
       void ctx.close();
     }
   } catch {
-    // Cross-origin without CORS, or undecodable: the clip renders without a waveform
+    // Unreadable or undecodable: the clip renders without a waveform
     return null;
   }
 }

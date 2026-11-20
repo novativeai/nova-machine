@@ -225,6 +225,8 @@ export interface ElementNodeData extends BaseNodeData {
    */
   appearance?: string;
   isDescribing?: boolean;
+  /** fal cost of the generated turnaround */
+  generationMetadata?: GenerationMetadata;
   /** Turnaround generation state */
   isGeneratingCharacter?: boolean;
   characterGenerationError?: string;
@@ -240,7 +242,8 @@ export interface OutputNodeData extends BaseNodeData {
   // Common fields
   thumbnailUrl: string;
   dimensions: { width: number; height: number };
-  role: 'output' | 'reference';
+  /** 'start_frame': an image output used as the first frame of image-to-video */
+  role: 'output' | 'reference' | 'start_frame';
   canChain: boolean;
   generationMetadata: GenerationMetadata;
   tagAssignment?: string; // For referencing in prompts when role is 'reference'

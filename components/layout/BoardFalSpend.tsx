@@ -3,7 +3,7 @@
 import { DollarSign } from 'lucide-react';
 import { useCanvasStore } from '@/stores';
 import { formatUsd } from '@/lib/fal';
-import type { AudioNodeData, GenerationMetadata, OutputNodeData } from '@/types';
+import type { AudioNodeData, ElementNodeData, GenerationMetadata, OutputNodeData } from '@/types';
 
 interface BoardSpend {
   total: number;
@@ -24,6 +24,8 @@ function selectBoardSpend(nodes: ReturnType<typeof useCanvasStore.getState>['nod
       metadata = data.generationMetadata;
     } else if (node.type === 'audio') {
       metadata = (node.data as AudioNodeData).generationMetadata;
+    } else if (node.type === 'element') {
+      metadata = (node.data as ElementNodeData).generationMetadata;
     }
     const cost = metadata?.cost;
     if (typeof cost !== 'number' || cost <= 0) continue;

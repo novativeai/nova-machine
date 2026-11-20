@@ -12,6 +12,7 @@ import type {
   VideoGenerationOutput,
 } from '@/types';
 import { formatErrorForDisplay } from './errors';
+import { IMAGE_MODELS } from './models';
 import { useSettingsStore } from '@/stores/settings-store';
 
 /** Shown whenever an action needs fal.ai but no key is saved. */
@@ -134,11 +135,23 @@ export function characterViewPrompt(view: CharacterView): string {
   return `${VIEW_DESCRIPTIONS[view]}. Identical face, hairstyle, skin tone, body shape, clothing, colors and accessories; same art style; neutral pose; plain light-grey studio background; no text.`;
 }
 
+/** fal cost of a generated turnaround (GPT Image 2.6 edits, priced from the returned sizes). */
+export function turnaroundCost(views: Array<{ width: number; height: number }>): { cost: number; breakdown: string; isEstimate: boolean } {
+  const perView = views.map((v) => IMAGE_MODELS['gpt-image-2.6'].price({ width: v.width, height: v.height, resolution: '1K', inputImages: 1 }));
+  return {
+    cost: perView.reduce((sum, e) => sum + e.costUsd, 0),
+    breakdown: `${views.length} views (GPT Image 2.6 edit): ${perView.map((e) => e.breakdown.split(' (')[0]).join(', ')}`,
+    isEstimate: true,
+  };
+}
+
 /**
  * Character turnaround from one image with GPT Image 2.6 edit (the most faithful editor):
  * three-quarter, side, back and face close-up, in that order. Throws if any view fails.
  */
-export async function generateCharacterViews(imageUrl: string): Promise<Array<{ view: CharacterView; url: string }>> {
+export async function generateCharacterViews(
+  imageUrl: string
+): Promise<Array<{ view: CharacterView; url: string; width: number; height: number }>> {
   const results = await Promise.all(
     CHARACTER_VIEWS.map((view) =>
       generateImage({
@@ -156,5 +169,8 @@ export async function generateCharacterViews(imageUrl: string): Promise<Array<{ 
   );
   const failed = results.find(({ result }) => !result.data?.images[0]?.url);
   if (failed) throw new Error(failed.result.error || `Failed to generate the ${failed.view} view`);
-  return results.map(({ view, result }) => ({ view, url: result.data!.images[0].url }));
+  return results.map(({ view, result }) => {
+    const image = result.data!.images[0];
+    return { view, url: image.url, width: image.width ?? 1024, height: image.height ?? 1024 };
+  });
 }

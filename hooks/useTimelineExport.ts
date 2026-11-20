@@ -2,31 +2,24 @@
 
 import { useCallback, useState } from 'react';
 import { nanoid } from 'nanoid';
-import { createNode, useCanvasStore } from '@/stores';
+import { createNode, useCanvasStore, useSettingsStore } from '@/stores';
 import { useAuth } from '@/contexts/AuthContext';
 import { persistUrlsToR2 } from '@/lib/r2';
 import { FAL_KEY_REQUIRED_MESSAGE, runFal, uploadFile } from '@/lib/fal';
-import { useSettingsStore } from '@/stores';
-import {
-  flattenVisual,
-  isAudible,
-  resolveClips,
-  sequenceEnd,
-  type TimelineClip,
-  type VisualSegment,
-} from '@/lib/timeline/layers';
+import { flattenVisual, resolveClips, sequenceEnd, type VisualSegment } from '@/lib/timeline/layers';
+import { renderMix } from '@/lib/timeline/mixdown';
 import type {
-  ComposeInput,
-  ComposeKeyframe,
-  ComposeOutput,
-  ComposeTrack,
   ImagesToVideoInput,
+  MergeAudioVideoInput,
+  MergeVideosInput,
   TrimVideoInput,
   TrimVideoOutput,
   VideoGenerationOutput,
 } from '@/types';
 
-const STILL_FPS = 24;
+const STILL_FPS = 30;
+const OUTPUT_FPS = 30;
+const OUTPUT_SIZE = { width: 1920, height: 1080 };
 /** Below this, a source offset or tail is treated as untrimmed. */
 const TRIM_EPSILON = 0.04;
 
@@ -39,6 +32,8 @@ export interface ExportState {
   progress: number;
   url?: string;
   error?: string;
+  /** Layers left out of the audio mix (could not be decoded). */
+  warning?: string;
 }
 
 /** A black 16:9 frame for gaps, generated in the browser and uploaded once per export. */
@@ -57,13 +52,6 @@ async function blackFrame(): Promise<File> {
   return new File([blob], 'gap.png', { type: 'image/png' });
 }
 
-/** Steps fal must run, counted up front for progress. */
-function countSteps(segments: VisualSegment[], audio: TimelineClip[]): number {
-  const visual = segments.filter((s) => s.kind !== 'video' || needsTrim(s)).length;
-  const audioTrims = audio.filter((c) => c.layer.trimStart > TRIM_EPSILON || c.layer.trimEnd > TRIM_EPSILON).length;
-  return visual + audioTrims + 1;
-}
-
 function needsTrim(segment: VisualSegment): boolean {
   const clip = segment.clip;
   if (!clip || segment.kind !== 'video') return false;
@@ -71,13 +59,13 @@ function needsTrim(segment: VisualSegment): boolean {
   return segment.sourceOffset > TRIM_EPSILON || tail > TRIM_EPSILON;
 }
 
-const ms = (seconds: number) => Math.round(seconds * 1000);
-
 /**
- * Renders the timeline to one MP4 on fal.ai (the user's key):
- * 1. flatten the stacked layers into one programme track (top visible layer wins),
+ * Renders the timeline to one MP4 on fal.ai (the user's key), matching the programme monitor:
+ * 1. flatten the stacked layers into one programme (top visible layer wins, holes are black),
  * 2. cut trimmed video sections (trim-video) and turn stills/gaps into clips (images-to-video),
- * 3. compose the programme with every audible audio layer and the clips' own sound.
+ * 3. join the sections in order (merge-videos),
+ * 4. mix every audible layer in the browser (exact volume, mute/solo, trims, offsets),
+ * 5. lay the mix onto the picture (merge-audio-video).
  * The result lands on the canvas as an output node.
  */
 export function useTimelineExport() {
@@ -97,101 +85,106 @@ export function useTimelineExport() {
       return;
     }
 
-    const audioClips = clips.filter((c) => c.track === 'audio' && c.url && isAudible(c, clips));
-    const total = countSteps(segments, audioClips);
+    const programmeSeconds = sequenceEnd(clips.filter((c) => c.track === 'visual'));
+    const total = segments.filter((s) => s.kind !== 'video' || needsTrim(s)).length + 3;
     let done = 0;
+    let falSteps = 0;
     const step = (message: string) => {
       done += 1;
-      setState({ stage: done >= total ? 'composing' : 'preparing', message, progress: Math.min(0.95, done / total) });
+      setState({ stage: 'preparing', message, progress: Math.min(0.95, done / total) });
     };
 
     try {
       setState({ stage: 'preparing', message: 'Preparing clips…', progress: 0 });
       let gapUrl: string | undefined;
 
-      // 1–2. Programme track keyframes
-      const programme: ComposeKeyframe[] = [];
-      const clipAudio: ComposeKeyframe[] = [];
+      // 1–2. One video file per programme section
+      const sections: string[] = [];
       for (const segment of segments) {
-        let url: string;
         if (segment.kind === 'video') {
           const clip = segment.clip!;
-          url = clip.url!;
+          let url = clip.url!;
           if (needsTrim(segment)) {
             const input: TrimVideoInput = { video_url: url, start_time: segment.sourceOffset, duration: segment.duration };
             const trimmed = await runFal<TrimVideoInput, TrimVideoOutput>('fal-ai/workflow-utilities/trim-video', input);
             if (!trimmed.success || !trimmed.data?.video.url) throw new Error(trimmed.error || `Could not trim “${clip.label}”`);
             url = trimmed.data.video.url;
+            falSteps += 1;
             step(`Trimmed “${clip.label}”`);
           }
-          if (isAudible(clip, clips)) clipAudio.push({ url, timestamp: ms(segment.start), duration: ms(segment.duration) });
+          sections.push(url);
+          continue;
+        }
+        let imageUrl: string;
+        if (segment.kind === 'gap') {
+          gapUrl ??= await uploadFile(await blackFrame());
+          imageUrl = gapUrl;
         } else {
-          let imageUrl: string;
-          if (segment.kind === 'gap') {
-            gapUrl ??= await uploadFile(await blackFrame());
-            imageUrl = gapUrl;
-          } else {
-            imageUrl = segment.clip!.url!;
-          }
-          const input: ImagesToVideoInput = {
-            images: [{ url: imageUrl, frames: Math.max(1, Math.round(segment.duration * STILL_FPS)) }],
-            fps: STILL_FPS,
-          };
-          const still = await runFal<ImagesToVideoInput, VideoGenerationOutput>('fal-ai/ffmpeg-api/images-to-video', input);
-          if (!still.success || !still.data?.video.url) throw new Error(still.error || 'Could not render a still');
-          url = still.data.video.url;
-          step(segment.kind === 'gap' ? 'Rendered a gap' : `Rendered still “${segment.clip!.label}”`);
+          imageUrl = segment.clip!.url!;
         }
-        programme.push({ url, timestamp: ms(segment.start), duration: ms(segment.duration) });
+        const input: ImagesToVideoInput = {
+          images: [{ url: imageUrl, frames: Math.max(1, Math.round(segment.duration * STILL_FPS)) }],
+          fps: STILL_FPS,
+        };
+        const still = await runFal<ImagesToVideoInput, VideoGenerationOutput>('fal-ai/ffmpeg-api/images-to-video', input);
+        if (!still.success || !still.data?.video.url) throw new Error(still.error || 'Could not render a still');
+        sections.push(still.data.video.url);
+        falSteps += 1;
+        step(segment.kind === 'gap' ? 'Rendered a gap' : `Rendered still “${segment.clip!.label}”`);
       }
 
-      // Audio layers (trimmed sections cut first)
-      const audioTracks: ComposeTrack[] = [];
-      for (const clip of audioClips) {
-        let url = clip.url!;
-        const length = clip.end - clip.start;
-        if (clip.layer.trimStart > TRIM_EPSILON || clip.layer.trimEnd > TRIM_EPSILON) {
-          const input: TrimVideoInput = { video_url: url, start_time: clip.layer.trimStart, duration: length };
-          const trimmed = await runFal<TrimVideoInput, TrimVideoOutput>('fal-ai/workflow-utilities/trim-video', input);
-          if (!trimmed.success || !trimmed.data?.video.url) throw new Error(trimmed.error || `Could not trim audio “${clip.label}”`);
-          url = trimmed.data.video.url;
-          step(`Trimmed audio “${clip.label}”`);
-        }
-        audioTracks.push({ id: `audio-${clip.nodeId}`, type: 'audio', keyframes: [{ url, timestamp: ms(clip.start), duration: ms(length) }] });
+      // 3. Join the picture
+      let pictureUrl = sections[0];
+      if (sections.length > 1) {
+        setState({ stage: 'composing', message: 'Joining scenes…', progress: Math.min(0.9, done / total) });
+        const input: MergeVideosInput = { video_urls: sections, target_fps: OUTPUT_FPS, resolution: OUTPUT_SIZE };
+        const merged = await runFal<MergeVideosInput, VideoGenerationOutput>('fal-ai/ffmpeg-api/merge-videos', input);
+        if (!merged.success || !merged.data?.video.url) throw new Error(merged.error || 'Could not join the scenes');
+        pictureUrl = merged.data.video.url;
+        falSteps += 1;
       }
-      if (clipAudio.length > 0) audioTracks.push({ id: 'clip-audio', type: 'audio', keyframes: clipAudio });
+      step('Scenes joined');
 
-      // 3. Compose
-      setState({ stage: 'composing', message: 'Composing final video…', progress: 0.96 });
-      const input: ComposeInput = { tracks: [{ id: 'programme', type: 'video', keyframes: programme }, ...audioTracks] };
-      const composed = await runFal<ComposeInput, ComposeOutput>('fal-ai/ffmpeg-api/compose', input);
-      if (!composed.success || !composed.data?.video_url) throw new Error(composed.error || 'Compose failed');
-      const videoUrl = composed.data.video_url;
-      const duration = Math.max(sequenceEnd(clips.filter((c) => c.track === 'visual')), ...audioClips.map((c) => c.end));
+      // 4. Mix the sound in the browser
+      setState({ stage: 'composing', message: 'Mixing audio…', progress: Math.min(0.93, done / total) });
+      const mix = await renderMix(clips, programmeSeconds);
+      step('Audio mixed');
 
-      // Land the cut on the canvas, right of everything else
+      // 5. Lay the mix onto the picture
+      let videoUrl = pictureUrl;
+      if (mix) {
+        setState({ stage: 'composing', message: 'Finishing the master…', progress: 0.96 });
+        const audioUrl = await uploadFile(mix.file);
+        const input: MergeAudioVideoInput = { video_url: pictureUrl, audio_url: audioUrl };
+        const muxed = await runFal<MergeAudioVideoInput, VideoGenerationOutput>('fal-ai/ffmpeg-api/merge-audio-video', input);
+        if (!muxed.success || !muxed.data?.video.url) throw new Error(muxed.error || 'Could not add the audio mix');
+        videoUrl = muxed.data.video.url;
+        falSteps += 1;
+      }
+
+      // Land the master on the canvas, right of everything else
       const maxX = nodes.reduce((m, n) => Math.max(m, n.position.x), 0);
       const minY = nodes.reduce((m, n) => Math.min(m, n.position.y), Number.POSITIVE_INFINITY);
       const outputNode = createNode('output', { x: maxX + 480, y: Number.isFinite(minY) ? minY : 0 }, {
         outputType: 'video',
         videoUrl,
-        thumbnailUrl: composed.data.thumbnail_url || '',
-        videoDuration: duration,
-        dimensions: { width: 1920, height: 1080 },
+        thumbnailUrl: '',
+        videoDuration: programmeSeconds,
+        dimensions: OUTPUT_SIZE,
         role: 'output',
         canChain: true,
         generationMetadata: {
           promptUsed: 'Timeline export',
-          modelUsed: 'fal-ai/ffmpeg-api/compose',
+          modelUsed: 'fal-ai/ffmpeg-api/merge-videos',
           modelLabel: 'Timeline export',
           inputNodes: clips.map((c) => c.nodeId),
-          duration,
-          aspectRatio: 'auto',
+          duration: programmeSeconds,
+          aspectRatio: '16:9',
           createdAt: new Date(),
-          requestId: composed.requestId || nanoid(),
-          // FFmpeg utilities bill compute seconds (fractions of a cent per step)
-          cost: 0.0002 * total * 10,
-          costBreakdown: `${total} FFmpeg step${total === 1 ? '' : 's'}, compute-billed (~$0.002 each)`,
+          requestId: nanoid(),
+          // FFmpeg utilities bill compute seconds: fractions of a cent per step
+          cost: 0.002 * falSteps,
+          costBreakdown: `${falSteps} FFmpeg step${falSteps === 1 ? '' : 's'}, compute-billed (~$0.002 each)`,
           costIsEstimate: true,
         },
       });
@@ -208,7 +201,13 @@ export function useTimelineExport() {
         }
       }
 
-      setState({ stage: 'done', message: 'Exported to the canvas', progress: 1, url: videoUrl });
+      setState({
+        stage: 'done',
+        message: 'Exported to the canvas',
+        progress: 1,
+        url: videoUrl,
+        warning: mix?.skipped.length ? `Not in the mix: ${mix.skipped.join(', ')}` : undefined,
+      });
     } catch (error) {
       setState({ stage: 'error', message: '', progress: 0, error: error instanceof Error ? error.message : 'Export failed' });
     }

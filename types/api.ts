@@ -419,6 +419,20 @@ export interface ComposeOutput {
   thumbnail_url: string;
 }
 
+/** Concatenate videos in order (min 2). Resolution edges 512–2048. */
+export interface MergeVideosInput {
+  video_urls: string[];
+  target_fps?: number;
+  resolution?: { width: number; height: number };
+}
+
+/** Lay an audio file onto a video as its sound track. */
+export interface MergeAudioVideoInput {
+  video_url: string;
+  audio_url: string;
+  start_offset?: number;
+}
+
 export interface ImagesToVideoInput {
   images: Array<{ url: string; frames: number }>;
   fps?: number;
@@ -463,7 +477,7 @@ export type LipSyncInput =
   | SyncVideoInput
   | VeedLipSyncInput;
 
-export type UtilityInput = ComposeInput | ImagesToVideoInput | TrimVideoInput;
+export type UtilityInput = ComposeInput | MergeVideosInput | MergeAudioVideoInput | ImagesToVideoInput | TrimVideoInput;
 
 export type FalInput = VideoGenerationInput | ImageGenerationInput | LipSyncInput | AudioGenerationInput | UtilityInput;
 

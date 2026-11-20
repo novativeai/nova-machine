@@ -4,8 +4,26 @@ import { useCallback, useRef, useEffect } from 'react';
 import { useCanvasStore, createNode } from '@/stores';
 import { useAuth } from '@/contexts/AuthContext';
 import { persistUrlsToR2 } from '@/lib/r2';
-import { generateCharacterViews } from '@/lib/fal';
+import { generateCharacterViews, turnaroundCost } from '@/lib/fal';
+import type { GenerationMetadata } from '@/types';
 import type { ElementNodeData } from '@/types';
+
+function turnaroundMetadata(views: Array<{ width: number; height: number }>, sourceId: string): GenerationMetadata {
+  const { cost, breakdown, isEstimate } = turnaroundCost(views);
+  return {
+    promptUsed: 'Character turnaround',
+    modelUsed: 'openai/gpt-image-2.6/sunburst/edit',
+    modelLabel: 'GPT Image 2.6',
+    category: 'image',
+    inputNodes: [sourceId],
+    aspectRatio: 'auto',
+    createdAt: new Date(),
+    requestId: '',
+    cost,
+    costBreakdown: breakdown,
+    costIsEstimate: isEstimate,
+  };
+}
 
 /**
  * Hook for generating character ElementNodes from an image.
@@ -69,6 +87,7 @@ export function useCharacterGeneration() {
             generatedReferenceUrls: viewUrls,
             generatedReferenceThumbnails: viewUrls,
             generatedReferenceLabels: views.map((v) => v.view),
+            generationMetadata: turnaroundMetadata(views, imageNodeId),
           }
         );
 
@@ -138,6 +157,7 @@ export function useCharacterGeneration() {
           referenceThumbnails: [...manualThumbs, ...viewUrls],
           referenceRemoteUrls: allRemote ? [...manualRemote, ...viewUrls] : data.referenceRemoteUrls,
           referenceUploadStatus: allRemote ? 'completed' : data.referenceUploadStatus,
+          generationMetadata: turnaroundMetadata(views, elementId),
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Turnaround failed';

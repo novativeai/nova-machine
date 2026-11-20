@@ -351,6 +351,7 @@ export function TimelinePanel() {
             target="_blank"
             rel="noreferrer"
             onClick={resetExport}
+            title={exportState.warning ?? 'Open the exported MP4'}
             className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-emerald-300 hover:bg-emerald-500/10"
           >
             <Download className="h-3 w-3" />

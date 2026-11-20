@@ -24,7 +24,8 @@ function TimelinePreviewComponent({ clips, hideEmptyHint = false }: TimelinePrev
   const isPlaying = useTimelineStore((s) => s.isPlaying);
   const mediaRefs = useRef(new Map<string, HTMLMediaElement>());
 
-  const active = activeVisualAt(clips, currentTime);
+  // At the very end of the programme keep the last frame on screen (no black flash)
+  const active = activeVisualAt(clips, currentTime) ?? (currentTime > 0 ? activeVisualAt(clips, currentTime - 1 / 30) : undefined);
   const mediaClips = clips.filter((c) => (c.kind === 'video' || c.kind === 'audio') && c.url);
 
   useEffect(() => {

@@ -470,6 +470,8 @@ const ROUTE_LABELS: Record<VideoRoute, string> = {
 function buildDisplayNames(): Record<GenerationModel, string> {
   const names: Partial<Record<GenerationModel, string>> = {
     'fal-ai/ffmpeg-api/compose': 'Timeline export · FFmpeg compose',
+    'fal-ai/ffmpeg-api/merge-videos': 'Timeline export · FFmpeg merge',
+    'fal-ai/ffmpeg-api/merge-audio-video': 'Timeline export · FFmpeg mux',
     'fal-ai/ffmpeg-api/images-to-video': 'FFmpeg · Stills to video',
     'fal-ai/workflow-utilities/trim-video': 'FFmpeg · Trim',
     'lightricks/ltx-2.5/audio-to-video/pro': 'LTX 2.5 Pro · Audio to Video',

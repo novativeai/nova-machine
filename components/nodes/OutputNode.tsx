@@ -1,7 +1,7 @@
 'use client';
 
-import { memo, useState, useRef, useCallback } from 'react';
-import { Handle, Position, useReactFlow } from '@xyflow/react';
+import { memo, useState, useRef, useCallback, useEffect } from 'react';
+import { Handle, Position, useReactFlow, useUpdateNodeInternals } from '@xyflow/react';
 import {
   Film,
   Download,
@@ -47,6 +47,13 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
 
   const isVideoOutput = data.outputType === 'video';
   const isReference = data.role === 'reference';
+  const isStartFrame = data.role === 'start_frame';
+
+  // The output handle appears/disappears with the role; React Flow must re-measure handles
+  const updateNodeInternals = useUpdateNodeInternals();
+  useEffect(() => {
+    updateNodeInternals(id);
+  }, [id, data.role, data.chainId, updateNodeInternals]);
 
   // fal.ai cost recorded at generation time (USD, billed to the user's own fal.ai account)
   const estimatedCost = data.generationMetadata?.cost;
@@ -209,7 +216,9 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
           </div>
           <div>
             <span className="text-sm font-semibold">
-              {isReference
+              {isStartFrame
+                ? 'Start Frame'
+                : isReference
                 ? isVideoOutput
                   ? 'Reference Video'
                   : 'Reference Image'
@@ -217,7 +226,7 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
                   ? 'Generated Video'
                   : 'Generated Image'}
             </span>
-            {!isReference && (
+            {!isReference && !isStartFrame && (
               <div className={cn(
                 'flex items-center gap-1 text-[10px]',
                 isVideoOutput ? 'text-green-500' : 'text-blue-500'
@@ -444,14 +453,33 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
             Chain
           </button>
         )}
-        {/* Image: Use as Reference button */}
-        {!isReference && !isVideoOutput && (
+        {/* Image: use as reference, or as the first frame of image-to-video */}
+        {!isReference && !isStartFrame && !isVideoOutput && (
+          <>
+            <button
+              onClick={handleConvertToReference}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-linear-to-r from-tag-image/20 to-tag-image/10 px-3 py-2.5 text-xs font-medium text-tag-image ring-1 ring-tag-image/30 transition-all hover:from-tag-image/30 hover:to-tag-image/20 active:scale-[0.98]"
+              title="Reference for look, character or style (@Image tag)"
+            >
+              <RefreshCw className="h-4 w-4" />
+              Use as Ref
+            </button>
+            <button
+              onClick={() => updateNode(id, { role: 'start_frame' })}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-secondary px-3 py-2.5 text-xs font-medium transition-all hover:bg-secondary/80 active:scale-[0.98]"
+              title="Animate this image: it becomes the first frame of image-to-video"
+            >
+              <Play className="h-4 w-4" />
+              Start frame
+            </button>
+          </>
+        )}
+        {isStartFrame && (
           <button
-            onClick={handleConvertToReference}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-linear-to-r from-tag-image/20 to-tag-image/10 px-3 py-2.5 text-xs font-medium text-tag-image ring-1 ring-tag-image/30 transition-all hover:from-tag-image/30 hover:to-tag-image/20 active:scale-[0.98]"
+            onClick={() => updateNode(id, { role: 'output' })}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-secondary px-3 py-2.5 text-xs font-medium transition-all hover:bg-secondary/80 active:scale-[0.98]"
           >
-            <RefreshCw className="h-4 w-4" />
-            Use as Ref
+            Unset start frame
           </button>
         )}
       </div>
@@ -464,7 +492,7 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
             <div>
               <div className="text-sm font-medium">Generate Character?</div>
               <div className="mt-1 text-xs text-muted-foreground">
-                Creates side & back views (~$0.30)
+                Creates a 4-view turnaround: three-quarter, side, back, face (~$0.80)
               </div>
             </div>
             <div className="flex gap-2">
@@ -517,8 +545,8 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
         <HashtagBadges nodeId={id} />
       </div>
 
-      {/* Output Handle (when converted to reference or chain node) */}
-      {(isReference || data.chainId) && (
+      {/* Output Handle (reference, start frame or chain node) */}
+      {(isReference || isStartFrame || data.chainId) && (
         <Handle type="source" position={Position.Right} id="output" />
       )}
 

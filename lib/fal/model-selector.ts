@@ -142,7 +142,10 @@ export function analyzeInputs(connectedNodes: NovaNode[]): InputShape {
   const videos = connectedNodes.filter((n) => n.type === 'video' || isOutputOfType(n, 'video'));
   const audio = getAudioSource(connectedNodes);
   const audioData = audio?.data as AudioNodeData | undefined;
-  const startFrame = byRole('start_frame');
+  // A generated image marked "Start frame" animates like an uploaded Start Frame image
+  const startFrame = byRole('start_frame') ?? connectedNodes.find(
+    (n) => n.type === 'output' && !(n.data as OutputNodeData).isPlaceholder && (n.data as OutputNodeData).role === 'start_frame'
+  );
 
   const elementWithFace = elements.find((n) => {
     const d = n.data as ElementNodeData;
