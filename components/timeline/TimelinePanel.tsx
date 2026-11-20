@@ -72,6 +72,7 @@ export function TimelinePanel() {
     seek,
     pause,
     togglePlay,
+    mainView,
   } = useTimelineStore();
   const { setCenter, getZoom } = useReactFlow();
   const { state: exportState, exportTimeline, reset: resetExport } = useTimelineExport();
@@ -122,10 +123,10 @@ export function TimelinePanel() {
     return () => cancelAnimationFrame(frame);
   }, [isPlaying, end, seek, pause]);
 
-  // The monitor (and its media) unmounts when collapsed, so stop the transport too
+  // The panel monitor (and its media) unmounts when collapsed; the Preview view keeps playing
   useEffect(() => {
-    if (!isOpen && isPlaying) pause();
-  }, [isOpen, isPlaying, pause]);
+    if (!isOpen && isPlaying && mainView === 'canvas') pause();
+  }, [isOpen, isPlaying, mainView, pause]);
 
   // Keep the playhead in view while playing
   useEffect(() => {
@@ -375,12 +376,14 @@ export function TimelinePanel() {
 
       {isOpen && (
         <div className="flex min-h-0 flex-1">
-          {/* Programme monitor */}
+          {/* Programme monitor (moves to the main window in Preview view, so only one is mounted) */}
+          {mainView === 'canvas' && (
           <div className="flex shrink-0 items-center justify-center border-r border-white/5 p-2" style={{ width: Math.min(420, ((height - BAR_HEIGHT - 16) * 16) / 9 + 16) }}>
             <div className="aspect-video w-full">
               <TimelinePreview clips={clips} />
             </div>
           </div>
+          )}
 
           {/* Tracks */}
           <div

@@ -16,15 +16,19 @@ import RemoteCursors from '@/components/canvas/RemoteCursors';
 import { CommandBar } from '@/components/ai/CommandBar';
 import { HashtagFilter } from '@/components/canvas/HashtagFilter';
 import { TimelinePanel } from '@/components/timeline/TimelinePanel';
+import { ProgramViewer } from '@/components/timeline/ProgramViewer';
+import { MainWindowTabs } from '@/components/layout/MainWindowTabs';
+import { cn } from '@/lib/utils';
 import { ReactFlowProvider } from '@xyflow/react';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
-import { useModalStore } from '@/stores';
+import { useModalStore, useTimelineStore } from '@/stores';
 import { usePresence, useAutoBoard } from '@/hooks';
 
 function CanvasContent() {
   const searchParams = useSearchParams();
   const boardId = searchParams.get('boardId');
   const { shareModal, closeShareModal } = useModalStore();
+  const mainView = useTimelineStore((s) => s.mainView);
 
   // Auto-create first board if user doesn't have one
   const { isInitializing } = useAutoBoard();
@@ -49,12 +53,26 @@ function CanvasContent() {
       <Header />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="relative m-1.5 mb-0 flex-1 overflow-hidden rounded-md border border-white/10 bg-background">
-          <FloatingToolbar />
-          <AssetSidebar />
-          <NovaCanvas updateCursor={updateCursor} />
-          {/* Remote cursors overlay for collaboration */}
-          {boardId && <RemoteCursors boardId={boardId} />}
+        <main className="relative m-1.5 mb-0 flex min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-white/10 bg-background">
+          <MainWindowTabs />
+          <div className="relative min-h-0 flex-1">
+            {/* Canvas stays mounted under the preview so the graph, viewport and selection survive switching */}
+            <div
+              className={cn('absolute inset-0', mainView === 'preview' && 'pointer-events-none invisible')}
+              aria-hidden={mainView === 'preview'}
+            >
+              <FloatingToolbar />
+              <AssetSidebar />
+              <NovaCanvas updateCursor={updateCursor} />
+              {/* Remote cursors overlay for collaboration */}
+              {boardId && <RemoteCursors boardId={boardId} />}
+            </div>
+            {mainView === 'preview' && (
+              <div className="absolute inset-0">
+                <ProgramViewer />
+              </div>
+            )}
+          </div>
         </main>
       </div>
       {/* Timeline: every node with its timeline icon on is a layer */}
