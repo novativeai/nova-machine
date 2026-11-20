@@ -26,6 +26,7 @@ import { cn, formatDuration } from '@/lib/utils';
 import { formatUsd, getModelDisplayName } from '@/lib/fal';
 import { ChainValidationCard } from './ChainValidationCard';
 import { HashtagBadges } from './HashtagBadges';
+import { TimelineToggle } from '@/components/timeline/TimelineToggle';
 
 interface OutputNodeProps {
   id: string;
@@ -181,6 +182,7 @@ function OutputNodeComponent({ id, data, selected }: OutputNodeProps) {
       {/* Header - Drag Handle */}
       <div className="nova-drag-handle mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
+          <TimelineToggle nodeId={id} />
           <div
             className={cn(
               'flex h-7 w-7 items-center justify-center rounded-lg',

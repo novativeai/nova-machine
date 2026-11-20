@@ -65,7 +65,7 @@ export async function validateAudioFile(file: File): Promise<ValidatedAudio | st
     return `Could not read "${file.name}". Try re-exporting it as MP3 or WAV.`;
   }
   if (seconds < AUDIO_MIN_SECONDS || seconds > AUDIO_MAX_SECONDS) {
-    return `Audio must be ${AUDIO_MIN_SECONDS}–${AUDIO_MAX_SECONDS} seconds for audio-to-video (this clip is ${seconds.toFixed(1)}s). Trim it and try again.`;
+    return `Audio must be ${AUDIO_MIN_SECONDS}–${AUDIO_MAX_SECONDS} seconds (this clip is ${seconds.toFixed(1)}s). Trim it and try again.`;
   }
 
   const typed = file.type === mime ? file : new File([file], file.name, { type: mime, lastModified: file.lastModified });

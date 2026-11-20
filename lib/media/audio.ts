@@ -1,11 +1,11 @@
-// Audio input spec for LTX 2.5 audio-to-video. Isomorphic: used by the canvas and by the upload routes.
+// Audio input spec for lip-sync and audio nodes. Isomorphic: used by the canvas and by the upload routes.
 
-/** fal accepts audio up to 15 MB (LTX 2.5 / Seedance audio inputs). */
+/** fal lip-sync models accept audio up to 15 MB (OmniHuman 2's limit, the strictest). */
 export const AUDIO_MAX_BYTES = 15 * 1024 * 1024;
 
-/** LTX 2.5 audio-to-video: 2–20 s (Pro up to 10 s, Fast up to 20 s). */
-export const AUDIO_MIN_SECONDS = 2;
-export const AUDIO_MAX_SECONDS = 20;
+/** Widest range any lip-sync model accepts (each model checks its own range at generation). */
+export const AUDIO_MIN_SECONDS = 1;
+export const AUDIO_MAX_SECONDS = 900;
 
 /** Canonical MIME type → file extension for every accepted audio format. */
 export const AUDIO_MIME_EXTENSIONS: Record<string, string> = {

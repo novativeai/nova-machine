@@ -1,13 +1,15 @@
 'use client';
 
-import { memo, useState, useRef, useCallback, useMemo } from 'react';
+import { memo, useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { User, X, Plus, Upload, Box, AlertTriangle } from 'lucide-react';
+import { User, X, Plus, Upload, Box, AlertTriangle, Loader2, Lock, RotateCw, Sparkles } from 'lucide-react';
 import type { ElementNodeData } from '@/types';
 import { useCanvasStore } from '@/stores';
 import { cn } from '@/lib/utils';
 import { getTagColor, isValidNameForTag, formatNameAsTag } from '@/lib/fal';
 import { HashtagBadges } from './HashtagBadges';
+import { useCharacterGeneration } from '@/hooks/useCharacterGeneration';
+import { useSettingsStore } from '@/stores';
 
 interface ElementNodeProps {
   id: string;
@@ -17,6 +19,23 @@ interface ElementNodeProps {
 
 function ElementNodeComponent({ id, data, selected }: ElementNodeProps) {
   const { nodes, removeNode, updateNode } = useCanvasStore();
+  const { generateTurnaround, describeCharacter } = useCharacterGeneration();
+  const hasFalKey = useSettingsStore((s) => s.falApiKey.length > 0);
+  const [appearanceDraft, setAppearanceDraft] = useState(data.appearance ?? '');
+  useEffect(() => {
+    setAppearanceDraft(data.appearance ?? '');
+  }, [data.appearance]);
+
+  // Auto-dismiss turnaround/description errors
+  useEffect(() => {
+    if (!data.characterGenerationError) return;
+    const timer = setTimeout(() => updateNode(id, { characterGenerationError: undefined }), 8000);
+    return () => clearTimeout(timer);
+  }, [data.characterGenerationError, id, updateNode]);
+
+  const generatedLabels = data.generatedReferenceLabels ?? [];
+  const hasTurnaround = generatedLabels.length > 0;
+  const frontalReady = Boolean(data.frontalRemoteUrl || data.frontalImageUrl?.startsWith('https://'));
   const [isEditingName, setIsEditingName] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const frontalInputRef = useRef<HTMLInputElement>(null);
@@ -415,6 +434,60 @@ function ElementNodeComponent({ id, data, selected }: ElementNodeProps) {
             <Plus className="h-4 w-4 text-muted-foreground" />
           </button>
         </div>
+      </div>
+
+      {/* Identity: turnaround + appearance lock (sent with every prompt that casts this character) */}
+      <div className="nodrag mt-3 space-y-2 border-t border-white/5 pt-2" onMouseDown={(e) => e.stopPropagation()}>
+        {hasTurnaround && (
+          <div className="flex flex-wrap gap-1">
+            {generatedLabels.map((label) => (
+              <span key={label} className="rounded bg-white/5 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-white/45">
+                {label}
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="flex gap-1.5">
+          <button
+            type="button"
+            onClick={() => generateTurnaround(id)}
+            disabled={!frontalReady || !hasFalKey || data.isGeneratingCharacter}
+            className="flex flex-1 items-center justify-center gap-1 rounded border border-border bg-background px-2 py-1 text-[11px] text-white/70 transition-colors hover:border-white/20 hover:text-white disabled:opacity-40"
+            title={!hasFalKey ? 'Add your fal.ai key to generate' : 'Generate three-quarter, side, back and face views with GPT Image 2.6 (~4 images)'}
+          >
+            {data.isGeneratingCharacter ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCw className="h-3 w-3" />}
+            {hasTurnaround ? 'Redo turnaround' : 'Turnaround'}
+          </button>
+          <button
+            type="button"
+            onClick={() => describeCharacter(id)}
+            disabled={!frontalReady || data.isDescribing}
+            className="flex flex-1 items-center justify-center gap-1 rounded border border-border bg-background px-2 py-1 text-[11px] text-white/70 transition-colors hover:border-white/20 hover:text-white disabled:opacity-40"
+            title="Describe the fixed look with Claude so every model keeps it"
+          >
+            {data.isDescribing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+            Describe
+          </button>
+        </div>
+        <div>
+          <div className="mb-1 flex items-center gap-1 text-[10px] text-muted-foreground">
+            <Lock className="h-2.5 w-2.5" />
+            Identity lock
+          </div>
+          <textarea
+            value={appearanceDraft}
+            onChange={(e) => setAppearanceDraft(e.target.value)}
+            onBlur={() => {
+              if (appearanceDraft !== (data.appearance ?? '')) updateNode(id, { appearance: appearanceDraft.trim() || undefined });
+            }}
+            placeholder="Fixed look kept in every shot: face, hair, outfit, colours..."
+            rows={3}
+            className="nowheel w-full resize-none rounded border border-border bg-background px-2 py-1 text-[11px] leading-snug text-white/80 placeholder:text-white/25 focus:border-primary focus:outline-none"
+          />
+        </div>
+        {data.characterGenerationError && (
+          <div className="rounded bg-destructive/10 px-2 py-1 text-[10px] text-destructive">{data.characterGenerationError}</div>
+        )}
       </div>
 
       <HashtagBadges nodeId={id} />

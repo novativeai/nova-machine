@@ -1,4 +1,18 @@
 import type { Node, Edge } from '@xyflow/react';
+import type {
+  AudioKind,
+  GenerationModel,
+  MusicModelId,
+  SoundModelId,
+  SpeechModelId,
+  ImageAspectRatio,
+  ImageModelId,
+  ImageResolution,
+  LipSyncModelId,
+  LipSyncResolution,
+  ModelCategory,
+  VideoModelId,
+} from './models';
 
 // ============================================================================
 // CORE ENUMS & CONSTANTS
@@ -8,7 +22,7 @@ export type NodeType = 'prompt' | 'image' | 'video' | 'element' | 'output' | 'ca
 
 export type TagType = 'image' | 'element' | 'video';
 
-export type PromptMode = 'video' | 'image';
+export type PromptMode = 'video' | 'image' | 'audio';
 
 export type MediaRole =
   | 'reference'
@@ -58,25 +72,72 @@ export interface TagMatch {
 // NODE DATA TYPES
 // ============================================================================
 
+// ============================================================================
+// TIMELINE
+// ============================================================================
+
+/**
+ * A node shown on the timeline is one layer (track). The layer lives on the node itself,
+ * so it syncs, persists and is deleted together with the node.
+ */
+export interface TimelineLayer {
+  enabled: boolean;
+  /** Stacking order: higher draws on top (V2 over V1). */
+  order: number;
+  /** Where the clip starts on the timeline, seconds. */
+  start: number;
+  /** Seconds cut from the head / tail of the source media. */
+  trimStart: number;
+  trimEnd: number;
+  /** Clip length for stills (images), seconds. */
+  stillDuration: number;
+  muted: boolean;
+  hidden: boolean;
+  locked: boolean;
+  solo: boolean;
+  /** 0–1, preview mix. */
+  volume: number;
+}
+
 export interface BaseNodeData {
   id: string;
   createdAt: Date;
   updatedAt: Date;
   /** Organizational hashtags (stored without '#' prefix) */
   hashtags?: string[];
+  /** Present once the node has been put on the timeline. */
+  timeline?: TimelineLayer;
 }
 
 export interface PromptNodeData extends BaseNodeData {
   prompt: string;
   mode: PromptMode;
-  // Video-specific settings (Seedance 2.5)
+  /** Chosen model per category (defaults: Seedance 2.5, GPT Image 2.6, OmniHuman 2). */
+  videoModel?: VideoModelId;
+  imageModel?: ImageModelId;
+  lipSyncModel?: LipSyncModelId;
+  // Video settings (coerced to what the chosen model supports at generation time)
   duration: VideoDuration;
-  aspectRatio: VideoAspectRatio; // text-to-video and reference-to-video only
+  aspectRatio: VideoAspectRatio;
   videoResolution: VideoResolution;
-  generateAudio: boolean; // Same price with or without audio
-  // Image-specific settings (GPT Image 2.6)
-  imageAspectRatio: '21:9' | '16:9' | '3:2' | '4:3' | '5:4' | '1:1' | '4:5' | '3:4' | '2:3' | '9:16';
-  imageResolution: '1K' | '2K' | '4K';
+  generateAudio: boolean;
+  // Lip-sync settings
+  lipSyncResolution?: LipSyncResolution;
+  // Audio mode (speech / sound / music), each with its own model choice
+  audioKind?: AudioKind;
+  speechModel?: SpeechModelId;
+  soundModel?: SoundModelId;
+  musicModel?: MusicModelId;
+  /** Speech voice (preset name of the chosen speech model). */
+  voice?: string;
+  /** Requested length for models that take one (sound effects, ElevenLabs/MiniMax music). */
+  audioSeconds?: number;
+  /** Song lyrics (structure tags like [verse] / [chorus] allowed). */
+  lyrics?: string;
+  instrumental?: boolean;
+  // Image settings
+  imageAspectRatio: ImageAspectRatio;
+  imageResolution: ImageResolution;
   // Generation state
   status: GenerationStatus;
   progress: number;
@@ -156,6 +217,17 @@ export interface ElementNodeData extends BaseNodeData {
   // These are preserved by syncElementConnections and merged with connected references
   generatedReferenceUrls?: string[];
   generatedReferenceThumbnails?: string[];
+  /** View name per generated reference ("three-quarter", "side", "back", "face"). */
+  generatedReferenceLabels?: string[];
+  /**
+   * Identity lock: a short description of the character's fixed appearance, added to every
+   * prompt that references this element so all models keep the same face, hair and outfit.
+   */
+  appearance?: string;
+  isDescribing?: boolean;
+  /** Turnaround generation state */
+  isGeneratingCharacter?: boolean;
+  characterGenerationError?: string;
 }
 
 export interface OutputNodeData extends BaseNodeData {
@@ -281,6 +353,8 @@ export interface AudioNodeData extends BaseNodeData {
   uploadStatus?: UploadStatus;
   remoteUrl?: string; // fal.ai URL after upload
   uploadError?: string;
+  /** Set when the audio was generated (speech, sound or music) */
+  generationMetadata?: GenerationMetadata;
 }
 
 export type NovaNodeData =
@@ -350,34 +424,21 @@ export interface ConnectedInput {
 export interface ConnectionValidation {
   isValid: boolean;
   error?: string;
-  suggestedModel?: VideoModel;
+  suggestedModel?: GenerationModel;
 }
 
 // ============================================================================
 // GENERATION TYPES
 // ============================================================================
 
-/** Durations offered in the UI (subset of Seedance's "4".."30" string enum). */
-export type VideoDuration = '4' | '5' | '6' | '8' | '10' | '12' | '15';
+/** Seconds as a string (Seedance takes a string enum; other models get the number). */
+export type VideoDuration = `${number}`;
 
 export type VideoAspectRatio = '16:9' | '9:16' | '1:1' | '4:3' | '3:4' | '21:9';
 
-export type VideoResolution = '480p' | '720p' | '1080p';
+export type VideoResolution = '360p' | '480p' | '720p' | '1080p' | '4k';
 
-export type VideoModel =
-  | 'bytedance/seedance-2.5/us/text-to-video'
-  | 'bytedance/seedance-2.5/us/image-to-video'
-  | 'bytedance/seedance-2.5/us/reference-to-video';
-
-export type ImageModel =
-  | 'openai/gpt-image-2.6/sunburst/text-to-image'
-  | 'openai/gpt-image-2.6/sunburst/edit';
-
-export type AudioToVideoModel =
-  | 'lightricks/ltx-2.5/audio-to-video/pro'
-  | 'lightricks/ltx-2.5/audio-to-video/fast';
-
-export type GenerationModel = VideoModel | ImageModel | AudioToVideoModel;
+export type { GenerationModel, ModelCategory };
 
 export interface GenerationMetadata {
   promptUsed: string;
@@ -395,6 +456,9 @@ export interface GenerationMetadata {
   costBreakdown?: string;
   /** true when fal bills by tokens and the cost is an estimate */
   costIsEstimate?: boolean;
+  /** Category and model picked on the prompt node */
+  category?: ModelCategory;
+  modelLabel?: string;
 }
 
 export interface GenerationProgress {

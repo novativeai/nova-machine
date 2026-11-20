@@ -2,11 +2,22 @@
 
 import { memo, useCallback, useMemo, useRef, useEffect, useState } from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { DollarSign, Key, X, Film, Image as ImageIcon, Volume2, VolumeX } from 'lucide-react';
+import { AlertTriangle, AudioLines, DollarSign, Key, Mic, X, Film, Image as ImageIcon, Volume2, VolumeX } from 'lucide-react';
 import { TextureButton } from '@/components/ui';
 import type {
+  AudioKind,
+  MusicModelId,
+  SoundModelId,
+  SpeechModelId,
+  ImageModelId,
+  LipSyncModelId,
+  LipSyncResolution,
   PromptNodeData,
   PromptMode,
+  VideoAspectRatio,
+  VideoDuration,
+  VideoModelId,
+  VideoResolution,
   ImageNodeData,
   VideoNodeData,
   ElementNodeData,
@@ -16,9 +27,19 @@ import type {
 import { useCanvasStore, useGenerationStore, useSettingsStore } from '@/stores';
 import { useGeneration } from '@/hooks';
 import {
+  DEFAULT_IMAGE_MODEL,
+  DEFAULT_LIPSYNC_MODEL,
+  DEFAULT_VIDEO_MODEL,
   formatUsd,
   getModelDisplayName,
+  IMAGE_ASPECT_RATIOS,
+  IMAGE_MODEL_ORDER,
+  IMAGE_MODELS,
+  LIPSYNC_MODEL_ORDER,
+  LIPSYNC_MODELS,
   planGeneration,
+  VIDEO_MODEL_ORDER,
+  VIDEO_MODELS,
   parseTags,
   getTagColor,
   formatNameAsTag,
@@ -27,6 +48,9 @@ import {
 } from '@/lib/fal';
 import { cn } from '@/lib/utils';
 import { HashtagBadges } from './HashtagBadges';
+import { TimelineToggle } from '@/components/timeline/TimelineToggle';
+import { ModelPicker, type ModelOption } from '@/components/prompt/ModelPicker';
+import { AUDIO_KIND_LABEL, AUDIO_MODEL_ORDER, getAudioModel, selectedAudioModel } from '@/lib/fal/audio-models';
 import {
   TagAutocomplete,
   useTagAutocomplete,
@@ -41,7 +65,7 @@ interface PromptNodeProps {
 
 function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const { updateNode, removeNode, getConnectedInputs, getEdgeTag, nodes, edges, highlightNode, clearHighlights } =
+  const { updateNode, removeNode, getConnectedInputs, getGenerationInputs, getEdgeTag, nodes, edges, highlightNode, clearHighlights } =
     useCanvasStore();
   const { startGeneration } = useGeneration();
   // Per-node generation check — only re-renders when THIS node's generation state changes
@@ -138,13 +162,63 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
 
   // Endpoint + estimated cost, from the same planner useGeneration uses.
   // Reads connected nodes fresh so role/duration changes on inputs are reflected.
-  const plan = useMemo(
-    () => planGeneration({ ...data, prompt: localPrompt }, getConnectedInputs(id)),
+  const generationInputs = useMemo(
+    () => getGenerationInputs(id),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [data, localPrompt, getConnectedInputs, id, nodes, edges]
+    [getGenerationInputs, id, nodes, edges]
   );
-  const selectedModel = plan.model;
-  const isAudioToVideo = plan.kind === 'audio-to-video';
+  const plan = useMemo(
+    () => planGeneration({ ...data, prompt: localPrompt }, generationInputs),
+    [data, localPrompt, generationInputs]
+  );
+  const category = plan.category;
+  const isLipSync = category === 'lipsync';
+
+  // Every model of the active category, priced for the current inputs and settings
+  const modelOptions = useMemo((): Array<ModelOption<string>> => {
+    const draft = { ...data, prompt: localPrompt };
+    const price = (override: Partial<PromptNodeData>) => {
+      const p = planGeneration({ ...draft, ...override }, generationInputs);
+      return { costUsd: p.costUsd, isEstimate: p.isEstimate, blocker: p.blocker };
+    };
+    if (category === 'image') {
+      return IMAGE_MODEL_ORDER.map((m) => ({ ...IMAGE_MODELS[m], ...price({ imageModel: m }) }));
+    }
+    if (category === 'lipsync') {
+      return LIPSYNC_MODEL_ORDER.map((m) => ({ ...LIPSYNC_MODELS[m], ...price({ lipSyncModel: m }) }));
+    }
+    if (category === 'speech') {
+      return AUDIO_MODEL_ORDER.speech.map((m) => ({ ...getAudioModel(m), ...price({ speechModel: m as SpeechModelId }) }));
+    }
+    if (category === 'sound') {
+      return AUDIO_MODEL_ORDER.sound.map((m) => ({ ...getAudioModel(m), ...price({ soundModel: m as SoundModelId }) }));
+    }
+    if (category === 'music') {
+      return AUDIO_MODEL_ORDER.music.map((m) => ({ ...getAudioModel(m), ...price({ musicModel: m as MusicModelId }) }));
+    }
+    return VIDEO_MODEL_ORDER.map((m) => ({ ...VIDEO_MODELS[m], ...price({ videoModel: m }) }));
+  }, [category, data, localPrompt, generationInputs]);
+  const isAudioMode = data.mode === 'audio';
+  const audioSpec = isAudioMode ? selectedAudioModel(data) : null;
+  const selectedModelId =
+    category === 'image'
+      ? data.imageModel ?? DEFAULT_IMAGE_MODEL
+      : category === 'lipsync'
+        ? data.lipSyncModel ?? DEFAULT_LIPSYNC_MODEL
+        : audioSpec
+          ? audioSpec.id
+          : data.videoModel ?? DEFAULT_VIDEO_MODEL;
+  const handleModelChange = useCallback(
+    (modelId: string) => {
+      if (category === 'image') updateNode(id, { imageModel: modelId as ImageModelId });
+      else if (category === 'lipsync') updateNode(id, { lipSyncModel: modelId as LipSyncModelId });
+      else if (category === 'speech') updateNode(id, { speechModel: modelId as SpeechModelId, voice: undefined });
+      else if (category === 'sound') updateNode(id, { soundModel: modelId as SoundModelId });
+      else if (category === 'music') updateNode(id, { musicModel: modelId as MusicModelId });
+      else updateNode(id, { videoModel: modelId as VideoModelId });
+    },
+    [category, id, updateNode]
+  );
 
   // Check if user has API key configured
   const hasApiKey = useSettingsStore((s) => s.falApiKey.length > 0);
@@ -318,8 +392,8 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
   const isGenerating = data.status === 'generating';
   const isImageMode = data.mode === 'image';
 
-  // A prompt is required, except audio-to-video where the audio (plus optional first frame) drives the video
-  const canGenerate = (localPrompt.trim().length > 0 || isAudioToVideo) && !isThisNodeGenerating;
+  // A prompt is required, except lip-sync where the audio (plus a face or clip) drives the video
+  const canGenerate = (localPrompt.trim().length > 0 || isLipSync) && !plan.blocker && !isThisNodeGenerating;
 
   // Render prompt with highlighted tags
   const renderPromptWithTags = () => {
@@ -407,17 +481,26 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
       {/* Header - Drag Handle */}
       <div className="nova-drag-handle mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
+          <TimelineToggle nodeId={id} />
           <div className={cn(
             'flex h-6 w-6 items-center justify-center rounded',
-            isImageMode ? 'bg-blue-500/20' : 'bg-primary/20'
+            isImageMode ? 'bg-blue-500/20' : isAudioMode ? 'bg-emerald-500/20' : 'bg-primary/20'
           )}>
             {isImageMode ? (
               <ImageIcon className="h-3.5 w-3.5 text-blue-500" />
+            ) : isAudioMode ? (
+              <AudioLines className="h-3.5 w-3.5 text-emerald-400" />
             ) : (
               <Film className="h-3.5 w-3.5 text-primary" />
             )}
           </div>
           <span className="text-sm font-medium">Prompt</span>
+          {isLipSync && (
+            <span className="flex items-center gap-1 rounded bg-pink-500/15 px-1.5 py-0.5 text-[10px] font-medium text-pink-300" title="Audio is wired in: this prompt makes a lip-synced performance">
+              <Mic className="h-2.5 w-2.5" />
+              Lip-sync
+            </span>
+          )}
         </div>
 
         {/* Mode Switcher */}
@@ -442,7 +525,7 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
             onClick={() => updateNode(id, { mode: 'video' as PromptMode })}
             className={cn(
               'flex h-6 items-center gap-1 rounded-md px-2 text-xs font-medium transition-all',
-              !isImageMode
+              data.mode === 'video'
                 ? 'bg-background text-primary shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
             )}
@@ -451,28 +534,84 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
             <Film className="h-3 w-3" />
             Video
           </button>
+          <button
+            onClick={() => updateNode(id, { mode: 'audio' as PromptMode })}
+            className={cn(
+              'flex h-6 items-center gap-1 rounded-md px-2 text-xs font-medium transition-all',
+              isAudioMode
+                ? 'bg-background text-emerald-400 shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            )}
+            disabled={isGenerating}
+            title="Speech, sound and music"
+          >
+            <AudioLines className="h-3 w-3" />
+            Audio
+          </button>
         </div>
       </div>
 
-      {/* Model & Cost Indicator */}
+      {/* Audio kind: speech / sound (speech + effects) / music */}
+      {isAudioMode && (
+        <div className="mb-2 grid grid-cols-3 gap-1 rounded-lg bg-secondary p-0.5" onMouseDown={(e) => e.stopPropagation()}>
+          {(['speech', 'sound', 'music'] as const).map((kind: AudioKind) => (
+            <button
+              key={kind}
+              type="button"
+              onClick={() => updateNode(id, { audioKind: kind })}
+              disabled={isGenerating}
+              className={cn(
+                'rounded-md py-1 text-[11px] font-medium transition-all',
+                (data.audioKind ?? 'speech') === kind ? 'bg-background text-emerald-400 shadow-sm' : 'text-muted-foreground hover:text-foreground'
+              )}
+              title={kind === 'sound' ? 'Dialogue, effects and ambience in one model' : undefined}
+            >
+              {AUDIO_KIND_LABEL[kind]}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Model picker (per category) */}
+      <div className="mb-2">
+        <ModelPicker
+          category={category}
+          value={selectedModelId}
+          options={modelOptions}
+          onChange={handleModelChange}
+          disabled={isGenerating}
+        />
+      </div>
+
+      {/* Endpoint & cost */}
       <div className="mb-2 rounded bg-secondary px-2 py-1">
         <div className="flex items-center justify-between">
           <span className="text-xs text-muted-foreground">
-            {getModelDisplayName(selectedModel)}
+            {getModelDisplayName(plan.endpoint)}
           </span>
           <span
             className="flex items-center gap-1 text-xs font-medium text-white/60"
             title="Estimated cost, billed by fal.ai to your own account"
           >
             <DollarSign className="h-3 w-3" />
-            ~{formatUsd(estimatedCost).replace('$', '')}
+            {plan.isEstimate ? '~' : ''}{formatUsd(estimatedCost).replace('$', '')}
           </span>
         </div>
         <div className="mt-0.5 text-[10px] leading-snug text-white/35">
           {costBreakdown}
           {plan.isEstimate && ' · estimate'}
         </div>
+        {plan.notes.length > 0 && (
+          <div className="mt-0.5 text-[10px] leading-snug text-white/45">{plan.notes.join(' · ')}</div>
+        )}
       </div>
+
+      {plan.blocker && (
+        <div className="mb-2 flex items-start gap-1.5 rounded border border-amber-500/20 bg-amber-500/5 px-2 py-1.5 text-[11px] leading-snug text-amber-300/90">
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>{plan.blocker}</span>
+        </div>
+      )}
 
       {/* Connected Tags Preview - Video mode only */}
       {!isImageMode && tagSuggestions.length > 0 && (
@@ -549,8 +688,16 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
             }
           }}
           placeholder={isImageMode
-            ? "Describe your image..."
-            : "Describe your video... Type @ to reference connected nodes"
+            ? 'Describe your image... Type @ to reference connected nodes'
+            : isAudioMode
+              ? (data.audioKind ?? 'speech') === 'speech'
+                ? 'Text to speak... audio tags like [whispers] or [laughs] direct the delivery'
+                : (data.audioKind ?? 'speech') === 'sound'
+                  ? 'Describe the scene: dialogue, sound effects, ambience...'
+                  : 'Describe the song: genre, mood, tempo, vocals, structure, length...'
+              : isLipSync
+              ? 'Optional: direct the performance (mood, gestures, camera)...'
+              : 'Describe your video... Type @ to reference connected nodes'
           }
           className="relative min-h-28 max-h-48 w-full resize-none overflow-y-auto whitespace-pre-wrap wrap-break-word rounded-lg border border-border bg-transparent p-2 text-sm leading-normal font-normal tracking-normal text-transparent caret-foreground placeholder:text-muted-foreground focus:border-primary focus:outline-none"
           style={{
@@ -569,98 +716,71 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
         />
       </div>
 
-      {/* Settings Row - Different for Image vs Video mode */}
-      <div className="mb-3 flex gap-2">
-        {isImageMode ? (
+      {/* Settings Row - adapts to the chosen model */}
+      <div className="mb-3 flex gap-2" onMouseDown={(e) => e.stopPropagation()}>
+        {plan.image && (
           <>
-            {/* Image Mode: Aspect Ratio and Resolution */}
             <select
               value={data.imageAspectRatio}
-              onChange={(e) =>
-                updateNode(id, {
-                  imageAspectRatio: e.target.value as PromptNodeData['imageAspectRatio'],
-                })
-              }
-              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
-              disabled={isGenerating}
+              onChange={(e) => updateNode(id, { imageAspectRatio: e.target.value as PromptNodeData['imageAspectRatio'] })}
+              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none disabled:opacity-50"
+              disabled={isGenerating || plan.image.edit}
+              title={plan.image.edit ? 'Edits follow the input images' : 'Aspect ratio'}
             >
-              <option value="1:1">1:1</option>
-              <option value="16:9">16:9</option>
-              <option value="9:16">9:16</option>
-              <option value="4:3">4:3</option>
-              <option value="3:4">3:4</option>
-              <option value="3:2">3:2</option>
-              <option value="2:3">2:3</option>
-              <option value="21:9">21:9</option>
-            </select>
-            <select
-              value={data.imageResolution}
-              onChange={(e) =>
-                updateNode(id, {
-                  imageResolution: e.target.value as '1K' | '2K' | '4K',
-                })
-              }
-              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
-              disabled={isGenerating}
-            >
-              <option value="1K">1K</option>
-              <option value="2K">2K</option>
-              <option value="4K">4K</option>
-            </select>
-          </>
-        ) : (
-          <>
-            {/* Video Mode: Seedance 2.5 settings (audio-to-video length follows the audio) */}
-            {!isAudioToVideo && (
-              <select
-                value={data.duration}
-                onChange={(e) =>
-                  updateNode(id, { duration: e.target.value as PromptNodeData['duration'] })
-                }
-                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
-                disabled={isGenerating}
-                title="Duration"
-              >
-                {(['4', '5', '6', '8', '10', '12', '15'] as const).map((d) => (
-                  <option key={d} value={d}>{d}s</option>
-                ))}
-              </select>
-            )}
-            <select
-              value={data.aspectRatio}
-              onChange={(e) =>
-                updateNode(id, {
-                  aspectRatio: e.target.value as PromptNodeData['aspectRatio'],
-                })
-              }
-              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
-              disabled={isGenerating || selectedModel === 'bytedance/seedance-2.5/us/image-to-video'}
-              title={selectedModel === 'bytedance/seedance-2.5/us/image-to-video' ? 'Follows the start frame' : 'Aspect ratio'}
-            >
-              {(isAudioToVideo
-                ? (['16:9', '9:16'] as const)
-                : (['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const)
-              ).map((ratio) => (
+              {IMAGE_ASPECT_RATIOS.map((ratio) => (
                 <option key={ratio} value={ratio}>{ratio}</option>
               ))}
             </select>
-            {!isAudioToVideo && (
-              <select
-                value={data.videoResolution}
-                onChange={(e) =>
-                  updateNode(id, { videoResolution: e.target.value as PromptNodeData['videoResolution'] })
-                }
-                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
-                disabled={isGenerating}
-                title="Resolution"
-              >
-                <option value="480p">480p</option>
-                <option value="720p">720p</option>
-                <option value="1080p">1080p</option>
-              </select>
-            )}
-            {/* Audio toggle — Seedance charges the same with or without audio */}
-            {!isAudioToVideo && (
+            <select
+              value={plan.image.resolution}
+              onChange={(e) => updateNode(id, { imageResolution: e.target.value as PromptNodeData['imageResolution'] })}
+              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
+              disabled={isGenerating}
+              title="Resolution"
+            >
+              {plan.image.spec.resolutions.map((r) => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
+          </>
+        )}
+
+        {plan.video && (
+          <>
+            <select
+              value={String(plan.video.durationSeconds)}
+              onChange={(e) => updateNode(id, { duration: e.target.value as VideoDuration })}
+              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none disabled:opacity-50"
+              disabled={isGenerating || plan.video.editing || (plan.video.route === 'reference' && Boolean(plan.video.spec.referenceDuration))}
+              title={plan.video.editing ? 'Follows the source video' : 'Duration'}
+            >
+              {plan.video.spec.durations.map((d) => (
+                <option key={d} value={String(d)}>{d}s</option>
+              ))}
+            </select>
+            <select
+              value={plan.video.aspectRatio}
+              onChange={(e) => updateNode(id, { aspectRatio: e.target.value as VideoAspectRatio })}
+              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none disabled:opacity-50"
+              disabled={isGenerating || plan.video.aspectFollowsFrame || plan.video.editing}
+              title={plan.video.aspectFollowsFrame ? 'Follows the start frame' : 'Aspect ratio'}
+            >
+              {plan.video.spec.aspectRatios.map((ratio) => (
+                <option key={ratio} value={ratio}>{ratio}</option>
+              ))}
+            </select>
+            <select
+              value={plan.video.resolution}
+              onChange={(e) => updateNode(id, { videoResolution: e.target.value as VideoResolution })}
+              className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
+              disabled={isGenerating}
+              title="Resolution"
+            >
+              {plan.video.spec.resolutions.map((r) => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
+            {plan.video.spec.audio === 'toggle' ? (
               <button
                 type="button"
                 onClick={() => updateNode(id, { generateAudio: !data.generateAudio })}
@@ -671,18 +791,122 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
                     : 'border-border bg-background text-muted-foreground hover:text-foreground'
                 )}
                 disabled={isGenerating}
-                title={data.generateAudio ? 'Audio enabled' : 'Audio disabled'}
+                title={data.generateAudio ? 'Native audio on' : 'Native audio off'}
               >
-                {data.generateAudio ? (
-                  <Volume2 className="h-3.5 w-3.5" />
-                ) : (
-                  <VolumeX className="h-3.5 w-3.5" />
-                )}
+                {data.generateAudio ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
               </button>
+            ) : (
+              <span
+                className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded border border-border text-muted-foreground/60"
+                title={plan.video.spec.audio === 'always' ? 'Native audio is always on for this model' : 'This model renders silent video'}
+              >
+                {plan.video.spec.audio === 'always' ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+              </span>
+            )}
+          </>
+        )}
+
+        {plan.audio && (
+          <>
+            {plan.audio.spec.voices && (
+              <select
+                value={data.voice && plan.audio.spec.voices.includes(data.voice) ? data.voice : plan.audio.spec.defaultVoice}
+                onChange={(e) => updateNode(id, { voice: e.target.value })}
+                className="flex-1 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
+                disabled={isGenerating}
+                title="Voice"
+              >
+                {plan.audio.spec.voices.map((v) => (
+                  <option key={v} value={v}>{v}</option>
+                ))}
+              </select>
+            )}
+            {plan.audio.spec.length && (
+              <label className="flex flex-1 items-center gap-1 rounded border border-border bg-background px-2 py-1 text-xs" title="Length in seconds">
+                <input
+                  type="number"
+                  min={plan.audio.spec.length.min}
+                  max={plan.audio.spec.length.max}
+                  step={plan.audio.spec.length.min < 1 ? 0.5 : 1}
+                  value={plan.audio.seconds}
+                  onChange={(e) => updateNode(id, { audioSeconds: Number(e.target.value) })}
+                  className="w-full bg-transparent focus:outline-none"
+                  disabled={isGenerating}
+                />
+                <span className="text-white/40">s</span>
+              </label>
+            )}
+            {plan.audio.spec.instrumentalToggle && (
+              <button
+                type="button"
+                onClick={() => updateNode(id, { instrumental: !data.instrumental })}
+                className={cn(
+                  'rounded border px-2 py-1.5 text-[11px] transition-all',
+                  data.instrumental ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-300' : 'border-border bg-background text-muted-foreground'
+                )}
+                disabled={isGenerating}
+              >
+                Instrumental
+              </button>
+            )}
+            {!plan.audio.spec.voices && !plan.audio.spec.length && !plan.audio.spec.instrumentalToggle && (
+              <span className="flex flex-1 items-center rounded border border-border px-2 py-1.5 text-[11px] text-white/50">
+                {plan.audio.spec.kind === 'music' ? 'Set length and structure in the prompt' : 'Length follows the prompt'}
+              </span>
+            )}
+          </>
+        )}
+
+        {plan.lipsync && (
+          <>
+            <span className="flex flex-1 items-center rounded border border-border px-2 py-1.5 text-[11px] text-white/60" title="How the lip-sync source was picked">
+              {plan.lipsync.route === 'video'
+                ? 'Re-sync connected clip'
+                : plan.lipsync.route === 'image'
+                  ? 'Animate connected face'
+                  : 'Portrait from prompt → lip-sync'}
+            </span>
+            {plan.lipsync.route === 'generated-face' && (
+              <select
+                value={data.aspectRatio}
+                onChange={(e) => updateNode(id, { aspectRatio: e.target.value as VideoAspectRatio })}
+                className="w-20 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
+                disabled={isGenerating}
+                title="Portrait aspect ratio"
+              >
+                {(['16:9', '9:16', '1:1', '4:3', '3:4'] as const).map((ratio) => (
+                  <option key={ratio} value={ratio}>{ratio}</option>
+                ))}
+              </select>
+            )}
+            {plan.lipsync.spec.resolutions.length > 0 && (
+              <select
+                value={plan.lipsync.resolution}
+                onChange={(e) => updateNode(id, { lipSyncResolution: e.target.value as LipSyncResolution })}
+                className="w-20 rounded border border-border bg-background px-2 py-1.5 text-xs focus:border-primary focus:outline-none"
+                disabled={isGenerating}
+                title="Resolution"
+              >
+                {plan.lipsync.spec.resolutions.map((r) => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
             )}
           </>
         )}
       </div>
+
+      {plan.audio && plan.audio.spec.lyrics !== 'none' && !(plan.audio.spec.instrumentalToggle && data.instrumental) && (
+        <textarea
+          value={data.lyrics ?? ''}
+          onChange={(e) => updateNode(id, { lyrics: e.target.value })}
+          onMouseDown={(e) => e.stopPropagation()}
+          placeholder={plan.audio.spec.lyrics === 'required' ? 'Lyrics (required): [verse] ... [chorus] ...' : 'Lyrics (optional): [verse] ... [chorus] ...'}
+          rows={4}
+          className="nodrag nowheel mb-3 w-full resize-none rounded-lg border border-border bg-transparent p-2 text-xs leading-snug focus:border-primary focus:outline-none"
+          disabled={isGenerating}
+        />
+      )}
 
       {/* Generate Button */}
       {!hasApiKey ? (
@@ -704,7 +928,11 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
             ? `Generating... ${Math.round(data.progress)}%`
             : isImageMode
               ? 'Generate Image'
-              : 'Generate Video'
+              : isAudioMode
+                ? `Generate ${AUDIO_KIND_LABEL[data.audioKind ?? 'speech']}`
+                : isLipSync
+                ? 'Generate Lip-sync'
+                : 'Generate Video'
           }
         </TextureButton>
       )}

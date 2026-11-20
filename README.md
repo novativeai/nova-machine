@@ -15,11 +15,21 @@ How the key is protected:
 
 ## Models
 
-| Use | fal.ai endpoint |
-|-----|-----------------|
-| Text / image / reference to video | `bytedance/seedance-2.5/us/*` |
-| Audio to video (2–20 s audio) | `lightricks/ltx-2.5/audio-to-video/{pro,fast}` |
-| Images, edits, characters, scenes | `openai/gpt-image-2.6/sunburst/*` |
+Every prompt node picks its model per category (each option shows its fal cost for the current inputs):
+
+| Category | Models (fal.ai) |
+|----------|-----------------|
+| Video | Seedance 2.5, Kling 4 (native multi-character casting), Gemini Omni Flash 1.2, Veo 3.1, Seedance 2.5 Flash |
+| Image | GPT Image 2.6, Nano Banana 2.1, FLUX 3, Seedream 5.5 |
+| Lip-sync (audio wired into a video prompt) | OmniHuman 2, HeyGen Avatar 6, MiniMax H3 Max Lip Sync, Sync 3 (photo or clip, picks the singer), VEED Lipsync 2 |
+| Speech | ElevenLabs Eleven v4, Gemini 3.8 Flash TTS |
+| Audio (dialogue + effects + ambience) | ByteDance Seed Audio 1.0, ElevenLabs SFX v3 |
+| Music | Google Lyria 3.5, ElevenLabs Music 2.5, MiniMax Music 3 |
+| Timeline export | FFmpeg compose / trim / stills-to-video |
+
+**Characters** keep their identity across scenes: a four-view turnaround (three-quarter, side, back, face), an identity lock (auto-described by Claude) added to every prompt that casts them, and native `@Element` casting on Kling 4.
+
+**Timeline**: switch the timeline icon on any prompt, video, image, audio or output node and it becomes a layer in the docked timeline (move, trim, snap, mute/solo/lock, preview, export to MP4). A prompt layer always plays its newest take, so regenerating a scene updates the edit.
 
 ## Tech stack
 

@@ -3,16 +3,14 @@ import type {
   GenerationModel,
   GenerationProgress,
   GenerationResult,
-  ImageGenerationInput,
-  LtxAudioToVideoInput,
-  VideoGenerationInput,
+  FalInput,
 } from '@/types';
 
 export interface GenerationRequest {
   id: string;
   promptNodeId: string;
   model: GenerationModel;
-  input: VideoGenerationInput | ImageGenerationInput | LtxAudioToVideoInput;
+  input: FalInput;
   status: 'queued' | 'processing' | 'completed' | 'failed';
   progress?: GenerationProgress;
   result?: GenerationResult;

@@ -3,7 +3,7 @@
 import { DollarSign } from 'lucide-react';
 import { useCanvasStore } from '@/stores';
 import { formatUsd } from '@/lib/fal';
-import type { OutputNodeData } from '@/types';
+import type { AudioNodeData, GenerationMetadata, OutputNodeData } from '@/types';
 
 interface BoardSpend {
   total: number;
@@ -11,19 +11,25 @@ interface BoardSpend {
   hasEstimates: boolean;
 }
 
-/** Sum the fal.ai cost recorded on every generated output on the board. */
+/** Sum the fal.ai cost recorded on every generated output (and generated audio) on the board. */
 function selectBoardSpend(nodes: ReturnType<typeof useCanvasStore.getState>['nodes']): BoardSpend {
   let total = 0;
   let count = 0;
   let hasEstimates = false;
   for (const node of nodes) {
-    if (node.type !== 'output') continue;
-    const data = node.data as OutputNodeData;
-    const cost = data.generationMetadata?.cost;
-    if (data.isPlaceholder || typeof cost !== 'number' || cost <= 0) continue;
+    let metadata: GenerationMetadata | undefined;
+    if (node.type === 'output') {
+      const data = node.data as OutputNodeData;
+      if (data.isPlaceholder) continue;
+      metadata = data.generationMetadata;
+    } else if (node.type === 'audio') {
+      metadata = (node.data as AudioNodeData).generationMetadata;
+    }
+    const cost = metadata?.cost;
+    if (typeof cost !== 'number' || cost <= 0) continue;
     total += cost;
     count += 1;
-    if (data.generationMetadata.costIsEstimate) hasEstimates = true;
+    if (metadata?.costIsEstimate) hasEstimates = true;
   }
   return { total, count, hasEstimates };
 }
@@ -42,7 +48,7 @@ export function BoardFalSpend() {
   return (
     <div
       className="flex h-7 items-center gap-1 rounded-md bg-white/5 px-2.5 text-xs font-medium text-white/60"
-      title={`fal.ai spend for the ${count} generation${count === 1 ? '' : 's'} on this board, billed to your own fal.ai account${hasEstimates ? ' (image costs are estimates; fal bills images by tokens)' : ''}`}
+      title={`fal.ai spend for the ${count} generation${count === 1 ? '' : 's'} on this board, billed to your own fal.ai account${hasEstimates ? ' (some costs are estimates: fal bills those by tokens or compute)' : ''}`}
     >
       <DollarSign className="h-3 w-3" />
       <span>{hasEstimates ? '~' : ''}{formatUsd(total).replace('$', '')}</span>

@@ -25,7 +25,9 @@ import type {
   CameraNode,
   LightingNode,
   AudioNode,
+  TimelineLayer,
 } from '@/types';
+import { defaultLayer, nextLayerOrder, resolveClips, sequenceEnd } from '@/lib/timeline/layers';
 
 interface CanvasState {
   // Nodes and Edges
@@ -59,10 +61,16 @@ interface CanvasState {
   getNextTagIndex: (type: TagType) => number;
   getNodeByTag: (tag: string) => NovaNode | undefined;
   getConnectedInputs: (promptNodeId: string) => NovaNode[];
+  /** Prompt inputs plus faces/clips wired into a connected Audio node (lip-sync source). */
+  getGenerationInputs: (promptNodeId: string) => NovaNode[];
   getEdgeTag: (sourceNodeId: string, targetPromptId: string) => string | undefined;
 
   // Element connection sync
   syncElementConnections: () => void;
+
+  // Timeline (a node on the timeline is one layer; the layer is stored on the node)
+  toggleTimelineLayer: (id: string) => void;
+  updateTimelineLayer: (id: string, patch: Partial<TimelineLayer>) => void;
 
   // Hashtag operations
   addHashtagToNode: (nodeId: string, tag: string) => void;
@@ -414,6 +422,24 @@ export const useCanvasStore = create<CanvasState>()(
         return nodes.filter((node) => connectedNodeIds.includes(node.id));
       },
 
+      getGenerationInputs: (promptNodeId) => {
+        const { nodes, edges } = get();
+        const direct = get().getConnectedInputs(promptNodeId);
+        const ids = new Set(direct.map((n) => n.id));
+        const extra: NovaNode[] = [];
+        for (const audio of direct.filter((n) => n.type === 'audio')) {
+          for (const edge of edges) {
+            if (edge.target !== audio.id || ids.has(edge.source)) continue;
+            const source = nodes.find((n) => n.id === edge.source);
+            if (source && (source.type === 'image' || source.type === 'element' || source.type === 'video' || source.type === 'output')) {
+              ids.add(source.id);
+              extra.push(source);
+            }
+          }
+        }
+        return [...direct, ...extra];
+      },
+
       getEdgeTag: (sourceNodeId, targetPromptId) => {
         const { edges } = get();
         const edge = edges.find((e) => e.source === sourceNodeId && e.target === targetPromptId);
@@ -542,6 +568,41 @@ export const useCanvasStore = create<CanvasState>()(
             connectedImageSourceIds: currentSourceIds,
           });
         }
+      },
+
+      toggleTimelineLayer: (id) => {
+        const { nodes, edges } = get();
+        const node = nodes.find((n) => n.id === id);
+        if (!node) return;
+        const layer = node.data.timeline;
+        if (layer?.enabled) {
+          get().updateTimelineLayer(id, { enabled: false });
+          return;
+        }
+        if (layer) {
+          // Turned back on: restore where it was
+          get().updateTimelineLayer(id, { enabled: true });
+          return;
+        }
+        // New layer: audio beds start at 0, pictures append after the current programme
+        const clips = resolveClips(nodes, edges);
+        const start = node.type === 'audio' ? 0 : sequenceEnd(clips.filter((c) => c.track === 'visual'));
+        set((state) => ({
+          nodes: state.nodes.map((n) =>
+            n.id === id
+              ? ({ ...n, data: { ...n.data, timeline: defaultLayer(nextLayerOrder(state.nodes), start), updatedAt: new Date() } } as typeof n)
+              : n
+          ) as NovaNode[],
+        }));
+      },
+
+      updateTimelineLayer: (id, patch) => {
+        set((state) => ({
+          nodes: state.nodes.map((n) => {
+            if (n.id !== id || !n.data.timeline) return n;
+            return { ...n, data: { ...n.data, timeline: { ...n.data.timeline, ...patch }, updatedAt: new Date() } } as typeof n;
+          }) as NovaNode[],
+        }));
       },
 
       // Hashtag operations

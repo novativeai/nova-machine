@@ -8,6 +8,7 @@ import { useCanvasStore, useModalStore } from '@/stores';
 import { cn, formatFileSize, formatDuration } from '@/lib/utils';
 import { getTagColor } from '@/lib/fal';
 import { HashtagBadges } from './HashtagBadges';
+import { TimelineToggle } from '@/components/timeline/TimelineToggle';
 
 interface VideoNodeProps {
   id: string;
@@ -64,6 +65,7 @@ function VideoNodeComponent({ id, data, selected }: VideoNodeProps) {
       {/* Header - Drag Handle */}
       <div className="nova-drag-handle mb-2 flex items-center justify-between">
         <div className="flex items-center gap-2">
+          <TimelineToggle nodeId={id} />
           <div
             className={cn('nova-node-icon', !tagColor && 'nova-node-icon-video')}
             style={tagColor ? { backgroundColor: `${tagColor}20` } : undefined}

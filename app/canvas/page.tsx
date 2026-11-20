@@ -15,6 +15,7 @@ import { ShareModal } from '@/components/modals/ShareModal';
 import RemoteCursors from '@/components/canvas/RemoteCursors';
 import { CommandBar } from '@/components/ai/CommandBar';
 import { HashtagFilter } from '@/components/canvas/HashtagFilter';
+import { TimelinePanel } from '@/components/timeline/TimelinePanel';
 import { ReactFlowProvider } from '@xyflow/react';
 import { ProtectedRoute } from '@/components/ProtectedRoute';
 import { useModalStore } from '@/stores';
@@ -44,11 +45,11 @@ function CanvasContent() {
   }
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-background">
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-[#070707]">
       <Header />
       <div className="flex flex-1 overflow-hidden">
         <Sidebar />
-        <main className="relative flex-1">
+        <main className="relative m-1.5 mb-0 flex-1 overflow-hidden rounded-md border border-white/10 bg-background">
           <FloatingToolbar />
           <AssetSidebar />
           <NovaCanvas updateCursor={updateCursor} />
@@ -56,6 +57,8 @@ function CanvasContent() {
           {boardId && <RemoteCursors boardId={boardId} />}
         </main>
       </div>
+      {/* Timeline: every node with its timeline icon on is a layer */}
+      <TimelinePanel />
       {/* AI Overlays */}
       <CommandBar />
       <HashtagFilter />

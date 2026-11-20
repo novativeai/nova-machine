@@ -7,9 +7,11 @@ import type { AudioNodeData } from '@/types';
 import { useCanvasStore } from '@/stores';
 import { cn } from '@/lib/utils';
 import { useAudioLoader } from '@/hooks';
-import { LTX_A2V_MAX_AUDIO_SECONDS } from '@/lib/fal/pricing';
-import { AUDIO_ACCEPT, AUDIO_FORMATS_LABEL, AUDIO_MAX_SECONDS, AUDIO_MIN_SECONDS } from '@/lib/media/audio';
+import { getModelDisplayName, LIPSYNC_MODEL_ORDER, LIPSYNC_MODELS } from '@/lib/fal/models';
+import { formatUsd } from '@/lib/fal/pricing';
+import { AUDIO_ACCEPT, AUDIO_FORMATS_LABEL, AUDIO_MAX_SECONDS } from '@/lib/media/audio';
 import { HashtagBadges } from './HashtagBadges';
+import { TimelineToggle } from '@/components/timeline/TimelineToggle';
 
 interface AudioNodeProps {
   id: string;
@@ -121,12 +123,18 @@ function AudioNodeComponent({ id, data, selected }: AudioNodeProps) {
   const isBusy = isValidating || data.uploadStatus === 'uploading';
   const isUploaded = data.uploadStatus === 'completed' && Boolean(data.remoteUrl);
   const uploadError = data.uploadStatus === 'error' ? data.uploadError || 'Upload failed' : null;
-  const tier =
-    data.duration > 0
-      ? data.duration <= LTX_A2V_MAX_AUDIO_SECONDS.pro
-        ? 'LTX 2.5 Pro'
-        : 'LTX 2.5 Fast'
-      : null;
+  // Lip-sync models whose audio range fits this clip
+  const fittingModels = data.duration > 0
+    ? LIPSYNC_MODEL_ORDER.filter((m) => {
+        const { minSeconds, maxSeconds } = LIPSYNC_MODELS[m].audio;
+        return data.duration >= minSeconds && data.duration <= maxSeconds;
+      })
+    : [];
+  const tier = data.duration > 0
+    ? fittingModels.length > 0
+      ? `Lip-sync ready · ${fittingModels.length}/${LIPSYNC_MODEL_ORDER.length} models`
+      : 'Too short for lip-sync'
+    : null;
 
   return (
     <div
@@ -149,7 +157,7 @@ function AudioNodeComponent({ id, data, selected }: AudioNodeProps) {
         <X className="h-3 w-3" />
       </button>
 
-      {/* Input Handle - optional first-frame image */}
+      {/* Input Handle - optional face (image or character) for lip-sync */}
       <Handle
         type="target"
         position={Position.Left}
@@ -160,16 +168,24 @@ function AudioNodeComponent({ id, data, selected }: AudioNodeProps) {
       {/* Header */}
       <div className="nova-drag-handle mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
+          <TimelineToggle nodeId={id} />
           <div className="nova-node-icon" style={{ backgroundColor: '#A855F720' }}>
             <Music className="h-3.5 w-3.5" style={{ color: '#A855F7' }} />
           </div>
           <span className="text-sm font-medium">Audio</span>
         </div>
-        {isUploaded && (
+        {isUploaded && data.generationMetadata ? (
+          <span
+            className="rounded bg-white/5 px-1.5 py-0.5 text-[10px] text-white/60"
+            title={`${data.generationMetadata.modelLabel ?? getModelDisplayName(data.generationMetadata.modelUsed)} · ${data.generationMetadata.costBreakdown ?? ''} · billed by fal.ai to your account`}
+          >
+            {data.generationMetadata.costIsEstimate ? '~' : ''}{formatUsd(data.generationMetadata.cost)}
+          </span>
+        ) : isUploaded ? (
           <span className="rounded bg-green-500/20 px-1.5 py-0.5 text-[10px] text-green-400">
             Synced
           </span>
-        )}
+        ) : null}
         {isBusy && (
           <span className="rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] text-blue-400">
             {isValidating ? 'Checking...' : 'Uploading...'}
@@ -210,7 +226,7 @@ function AudioNodeComponent({ id, data, selected }: AudioNodeProps) {
             or click to browse
           </span>
           <span className="mt-2 text-[10px] text-muted-foreground/50">
-            {AUDIO_FORMATS_LABEL} · {AUDIO_MIN_SECONDS}–{AUDIO_MAX_SECONDS}s · max 15 MB
+            {AUDIO_FORMATS_LABEL} · up to {AUDIO_MAX_SECONDS / 60} min · max 15 MB
           </span>
         </button>
       ) : (

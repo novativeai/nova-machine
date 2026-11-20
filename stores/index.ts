@@ -7,3 +7,4 @@ export { useAIStore } from './ai-store';
 export { useChainStore } from './chain-store';
 export { useSettingsStore } from './settings-store';
 export { useFileBrowserStore } from './file-browser-store';
+export * from './timeline-store';

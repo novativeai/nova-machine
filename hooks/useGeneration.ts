@@ -9,63 +9,50 @@ import { useSettingsStore } from '@/stores';
 import { useAuth } from '@/contexts/AuthContext';
 import { persistUrlsToR2 } from '@/lib/r2';
 import {
-  estimateAudioToVideoCost,
-  estimateImageCostFromPixels,
-  generateAudioToVideo,
-  generateImage,
-  generateVideo,
-  getAudioSource,
-  getGptImageSize,
-  getModelDisplayName,
-  getReferenceVideoSeconds,
+  analyzeInputs,
+  buildImageRequest,
+  buildLipSyncRequest,
+  buildVideoRequest,
+  combineEstimates,
   FAL_KEY_REQUIRED_MESSAGE,
   formatNameAsTag,
+  getModelDisplayName,
   isValidNameForTag,
-  isVideoEdit,
-  LTX_A2V_MAX_AUDIO_SECONDS,
-  LTX_A2V_MIN_AUDIO_SECONDS,
   planGeneration,
+  portraitPrompt,
+  type ResolvedElement,
+  type ResolvedMedia,
+  runFal,
   translateNameTagsForApi,
   uploadFile,
   validateAllTags,
 } from '@/lib/fal';
+import type { CostEstimate, GenerationPlan } from '@/lib/fal';
+import { buildAudioRequest } from '@/lib/fal/audio-models';
 import type {
+  AudioGenerationOutput,
   AudioNodeData,
-  AudioToVideoModel,
   CameraNodeData,
   ElementNodeData,
+  FalInput,
   GenerationMetadata,
-  ImageGenerationInput,
-  ImageModel,
+  ImageGenerationOutput,
   ImageNodeData,
   LightingNodeData,
-  LtxAudioToVideoInput,
+  LipSyncOutput,
   NovaNode,
   OutputNodeData,
   PromptNodeData,
-  SeedanceImageToVideoInput,
-  SeedanceReferenceToVideoInput,
-  SeedanceTextToVideoInput,
-  VideoGenerationInput,
-  VideoModel,
+  VideoGenerationOutput,
   VideoNodeData,
   VideoResolution,
 } from '@/types';
 import { formatCameraSettings } from '@/components/nodes/CameraNode';
 import { formatLightingSettings } from '@/components/nodes/LightingNode';
 
-// Seedance 2.5 reference-to-video limits (from the endpoint schema)
-const SEEDANCE_MAX_IMAGES = 30;
-const SEEDANCE_MAX_VIDEOS = 10;
-const SEEDANCE_MAX_FILES = 50;
-const SEEDANCE_MIN_VIDEO_SECONDS = 1.8;
-const SEEDANCE_MAX_VIDEO_SECONDS = 30.2;
-// GPT Image 2.6 edit accepts up to 16 input images
-const GPT_IMAGE_MAX_INPUTS = 16;
+const VIDEO_HEIGHT: Record<VideoResolution, number> = { '360p': 360, '480p': 480, '720p': 720, '1080p': 1080, '4k': 2160 };
 
-const VIDEO_HEIGHT: Record<VideoResolution, number> = { '480p': 480, '720p': 720, '1080p': 1080 };
-
-/** Expected output dimensions for a Seedance render (exact size isn't returned by the API). */
+/** Expected output dimensions for a render whose exact size isn't returned by the API. */
 function videoDimensions(resolution: VideoResolution, aspectRatio: string): { width: number; height: number } {
   const [w, h] = aspectRatio.split(':').map(Number);
   const short = VIDEO_HEIGHT[resolution];
@@ -80,6 +67,9 @@ function tagIndex(tag: string | undefined): number {
   const match = tag?.match(/(\d+)$/);
   return match ? parseInt(match[1], 10) : Number.MAX_SAFE_INTEGER;
 }
+
+/** Best identity views first, so models that take fewer views get the most useful ones. */
+const VIEW_PRIORITY = ['three-quarter', 'face', 'side', 'back'];
 
 /**
  * Wait for all pending uploads for the given nodes to complete
@@ -100,7 +90,6 @@ async function waitForPendingUploads(connectedNodes: NovaNode[]): Promise<void> 
   }
 
   if (uploadPromises.length > 0) {
-    console.log('[Generation] Waiting for', uploadPromises.length, 'pending upload(s)...');
     await Promise.all(uploadPromises);
   }
 }
@@ -147,10 +136,10 @@ async function resolveVideoUrl(data: VideoNodeData): Promise<string> {
   return data.videoUrl;
 }
 
-/** Frontal image followed by reference views, uploading on demand. */
-async function resolveElementUrls(data: ElementNodeData): Promise<string[]> {
+/** Frontal image plus ordered views, uploading on demand. */
+async function resolveElement(data: ElementNodeData, tag: string | undefined): Promise<ResolvedElement> {
   if (!data.frontalFile && !data.frontalImageUrl && !data.frontalRemoteUrl) {
-    throw new Error(`Element "${data.name}" is missing a frontal image. Please add a frontal image before generating.`);
+    throw new Error(`Character "${data.name}" is missing a frontal image. Add one before generating.`);
   }
 
   const frontal = data.frontalRemoteUrl
@@ -168,7 +157,32 @@ async function resolveElementUrls(data: ElementNodeData): Promise<string[]> {
     references = data.referenceImageUrls;
   }
 
-  return [frontal, ...references];
+  // Generated turnaround views carry labels: put the most identity-rich first
+  const generated = data.generatedReferenceUrls ?? [];
+  const labels = data.generatedReferenceLabels ?? [];
+  const rank = (url: string) => {
+    const i = generated.indexOf(url);
+    const label = i >= 0 ? labels[i] : undefined;
+    const p = label ? VIEW_PRIORITY.indexOf(label) : -1;
+    return p >= 0 ? p : VIEW_PRIORITY.length;
+  };
+  const views = [...references].sort((a, b) => rank(a) - rank(b));
+
+  return {
+    tag,
+    name: data.name || tag || 'the character',
+    kind: data.elementType,
+    frontal,
+    views,
+    appearance: data.appearance,
+  };
+}
+
+/** Face close-up of a character when it has one, else its frontal image. */
+function elementFaceUrl(element: ResolvedElement, data: ElementNodeData): string {
+  const i = (data.generatedReferenceLabels ?? []).indexOf('face');
+  const url = i >= 0 ? data.generatedReferenceUrls?.[i] : undefined;
+  return url ?? element.frontal;
 }
 
 async function resolveAudioUrl(data: AudioNodeData): Promise<string> {
@@ -179,7 +193,17 @@ async function resolveAudioUrl(data: AudioNodeData): Promise<string> {
     const blob = await (await fetch(data.audioUrl)).blob();
     return uploadFile(new File([blob], data.fileName || 'audio.mp3', { type: blob.type }));
   }
-  throw new Error('Audio file is required for audio-to-video. Please upload an audio file to the Audio node.');
+  throw new Error('Audio file is required for lip-sync. Upload an audio file to the Audio node.');
+}
+
+function nodeMediaUrl(node: NovaNode): Promise<string | undefined> {
+  if (node.type === 'image') return resolveImageUrl(node.data as ImageNodeData);
+  if (node.type === 'video') return resolveVideoUrl(node.data as VideoNodeData);
+  if (node.type === 'output') {
+    const data = node.data as OutputNodeData;
+    return Promise.resolve(data.outputType === 'video' ? data.videoUrl : data.imageUrl);
+  }
+  return Promise.resolve(undefined);
 }
 
 interface OutputPayload {
@@ -190,6 +214,25 @@ interface OutputPayload {
   metadata: GenerationMetadata;
 }
 
+/** Length of a remote audio file from its metadata (0 if it can't be read). */
+function probeRemoteAudio(url: string): Promise<number> {
+  return new Promise((resolve) => {
+    const audio = new Audio();
+    audio.preload = 'metadata';
+    const done = (seconds: number) => {
+      audio.removeAttribute('src');
+      resolve(Number.isFinite(seconds) ? seconds : 0);
+    };
+    audio.onloadedmetadata = () => done(audio.duration);
+    audio.onerror = () => done(0);
+    audio.src = url;
+  });
+}
+
+function firstVideoUrl(data: VideoGenerationOutput | LipSyncOutput | undefined): string | undefined {
+  return data?.video?.url;
+}
+
 export function useGeneration() {
   const { user } = useAuth();
 
@@ -197,7 +240,7 @@ export function useGeneration() {
     updateNode,
     addNode,
     addEdge,
-    getConnectedInputs,
+    getGenerationInputs: getConnectedInputs,
     getEdgeTag,
   } = useCanvasStore();
 
@@ -281,259 +324,63 @@ export function useGeneration() {
   );
 
   /**
-   * Seedance 2.5 input. For reference-to-video, canvas tags are remapped to Seedance's
-   * positional tags: @ImageN → its index in image_urls, @ElementN → its frontal image's
-   * index (reference views appended and described), @VideoN → its index in video_urls.
+   * Upload/collect every connected input once, in tag order, for the request builders.
    */
-  const buildVideoInput = useCallback(
-    async (
-      promptNodeId: string,
-      promptData: PromptNodeData,
-      connectedNodes: NovaNode[],
-      model: VideoModel
-    ): Promise<VideoGenerationInput> => {
-      const prompt = buildPromptText(promptNodeId, promptData, connectedNodes);
+  const resolveMedia = useCallback(
+    async (promptNodeId: string, promptData: PromptNodeData, connectedNodes: NovaNode[]): Promise<ResolvedMedia> => {
+      const shape = analyzeInputs(connectedNodes);
+      const tagOf = (node: NovaNode) => getEdgeTag(node.id, promptNodeId);
 
-      if (model === 'bytedance/seedance-2.5/us/text-to-video') {
-        const input: SeedanceTextToVideoInput = {
-          prompt,
-          duration: promptData.duration,
-          resolution: promptData.videoResolution,
-          aspect_ratio: promptData.aspectRatio,
-          generate_audio: promptData.generateAudio,
-        };
-        return input;
-      }
+      const images = await Promise.all(
+        [...shape.referenceImages]
+          .sort((a, b) => tagIndex(tagOf(a)) - tagIndex(tagOf(b)))
+          .map(async (node) => ({ url: (await nodeMediaUrl(node)) ?? '', tag: tagOf(node) }))
+      );
+      const elementNodes = [...shape.elements].sort((a, b) => tagIndex(tagOf(a)) - tagIndex(tagOf(b)));
+      const elements = await Promise.all(
+        elementNodes.map((node) => resolveElement(node.data as ElementNodeData, tagOf(node)))
+      );
+      const videos = await Promise.all(
+        [...shape.videos]
+          .sort((a, b) => tagIndex(tagOf(a)) - tagIndex(tagOf(b)))
+          .map(async (node) => ({
+            url: (await nodeMediaUrl(node)) ?? '',
+            tag: tagOf(node),
+            seconds: (node.type === 'video'
+              ? (node.data as VideoNodeData).duration
+              : (node.data as OutputNodeData).videoDuration) || 0,
+          }))
+      );
 
-      if (model === 'bytedance/seedance-2.5/us/image-to-video') {
-        const frame = (role: ImageNodeData['role']) =>
-          connectedNodes.find((n) => n.type === 'image' && (n.data as ImageNodeData).role === role);
-        const startNode = frame('start_frame');
-        const endNode = frame('end_frame');
-        if (!startNode) {
-          throw new Error('Image-to-video needs a Start Frame image. Set an image\'s role to Start Frame.');
-        }
-        const input: SeedanceImageToVideoInput = {
-          image_url: await resolveImageUrl(startNode.data as ImageNodeData),
-          prompt,
-          duration: promptData.duration,
-          resolution: promptData.videoResolution,
-          generate_audio: promptData.generateAudio,
-        };
-        if (endNode) input.end_image_url = await resolveImageUrl(endNode.data as ImageNodeData);
-        return input;
-      }
+      const media: ResolvedMedia = {
+        prompt: buildPromptText(promptNodeId, promptData, connectedNodes),
+        images: images.filter((i) => i.url),
+        elements,
+        videos: videos.filter((v) => v.url),
+      };
+      if (shape.startFrame) media.startFrame = await resolveImageUrl(shape.startFrame.data as ImageNodeData);
+      if (shape.endFrame) media.endFrame = await resolveImageUrl(shape.endFrame.data as ImageNodeData);
 
-      // Reference-to-video
-      const taggedImages: Array<{ url: string; tag?: string }> = [];
-      const untaggedImages: string[] = [];
-      const elements: Array<{ tag?: string; label: string; kind: string; urls: string[] }> = [];
-      const videos: Array<{ url: string; tag?: string; seconds: number }> = [];
-
-      for (const node of connectedNodes) {
-        const tag = getEdgeTag(node.id, promptNodeId);
-        if (node.type === 'image') {
-          const url = await resolveImageUrl(node.data as ImageNodeData);
-          if (tag?.startsWith('@Image')) taggedImages.push({ url, tag });
-          else untaggedImages.push(url); // start/end frames act as plain references here
-        } else if (node.type === 'element') {
-          const data = node.data as ElementNodeData;
-          elements.push({
-            tag,
-            label: data.name || tag || 'the element',
-            kind: data.elementType,
-            urls: await resolveElementUrls(data),
-          });
-        } else if (node.type === 'video') {
-          const data = node.data as VideoNodeData;
-          videos.push({ url: await resolveVideoUrl(data), tag, seconds: data.duration || 0 });
-        } else if (node.type === 'output') {
-          const data = node.data as OutputNodeData;
-          if (data.role !== 'reference') continue;
-          if (data.outputType === 'image' && data.imageUrl) {
-            if (tag?.startsWith('@Image')) taggedImages.push({ url: data.imageUrl, tag });
-            else untaggedImages.push(data.imageUrl);
-          } else if (data.outputType === 'video' && data.videoUrl) {
-            videos.push({ url: data.videoUrl, tag, seconds: data.videoDuration || 0 });
+      if (shape.audio) {
+        const audioData = shape.audio.data as AudioNodeData;
+        media.audio = { url: await resolveAudioUrl(audioData), seconds: audioData.duration || 0 };
+        if (shape.lipSyncVideo) media.lipSyncVideo = await nodeMediaUrl(shape.lipSyncVideo);
+        if (shape.faceImage) {
+          if (shape.faceImage.type === 'element') {
+            const i = elementNodes.indexOf(shape.faceImage);
+            media.faceImage = elements[i]?.frontal;
+          } else {
+            media.faceImage = await nodeMediaUrl(shape.faceImage);
           }
         }
-      }
-
-      const tagMap = new Map<string, string>();
-      const imageUrls: string[] = [];
-      const addImage = (url: string): number => {
-        imageUrls.push(url);
-        return imageUrls.length;
-      };
-
-      taggedImages.sort((a, b) => tagIndex(a.tag) - tagIndex(b.tag));
-      for (const image of taggedImages) {
-        const position = addImage(image.url);
-        if (image.tag) tagMap.set(image.tag, `@Image${position}`);
-      }
-      for (const url of untaggedImages) addImage(url);
-
-      const elementNotes: string[] = [];
-      elements.sort((a, b) => tagIndex(a.tag) - tagIndex(b.tag));
-      for (const element of elements) {
-        const [frontal, ...views] = element.urls;
-        const frontalPosition = addImage(frontal);
-        if (element.tag) tagMap.set(element.tag, `@Image${frontalPosition}`);
-        if (views.length > 0) {
-          const viewTags = views.map((url) => `@Image${addImage(url)}`);
-          elementNotes.push(
-            `${viewTags.join(', ')} show${viewTags.length === 1 ? 's' : ''} the same ${element.kind} as @Image${frontalPosition} (${element.label}) from other angles.`
-          );
+        // Multi-person clip + a wired character: lip-sync only that character's mouth
+        if (elementNodes.length > 0 && elements[0]) {
+          media.speakerFace = elementFaceUrl(elements[0], elementNodes[0].data as ElementNodeData);
         }
       }
-
-      videos.sort((a, b) => tagIndex(a.tag) - tagIndex(b.tag));
-      videos.forEach((video, i) => {
-        if (video.tag) tagMap.set(video.tag, `@Video${i + 1}`);
-      });
-
-      if (imageUrls.length > SEEDANCE_MAX_IMAGES) {
-        throw new Error(`Seedance accepts up to ${SEEDANCE_MAX_IMAGES} reference images (elements count each view). You have ${imageUrls.length}.`);
-      }
-      if (videos.length > SEEDANCE_MAX_VIDEOS) {
-        throw new Error(`Seedance accepts up to ${SEEDANCE_MAX_VIDEOS} reference videos.`);
-      }
-      if (imageUrls.length + videos.length > SEEDANCE_MAX_FILES) {
-        throw new Error(`Seedance accepts up to ${SEEDANCE_MAX_FILES} reference files in total.`);
-      }
-      const knownVideoSeconds = videos.map((v) => v.seconds).filter((s) => s > 0);
-      if (knownVideoSeconds.some((s) => s < SEEDANCE_MIN_VIDEO_SECONDS || s > SEEDANCE_MAX_VIDEO_SECONDS)) {
-        throw new Error(`Each reference video must be ${SEEDANCE_MIN_VIDEO_SECONDS}–${SEEDANCE_MAX_VIDEO_SECONDS} seconds long.`);
-      }
-      if (knownVideoSeconds.reduce((a, b) => a + b, 0) > SEEDANCE_MAX_VIDEO_SECONDS) {
-        throw new Error(`Reference videos must total ${SEEDANCE_MAX_VIDEO_SECONDS} seconds or less.`);
-      }
-
-      // Single pass so remapped tags can never be remapped again
-      const remapped = prompt.replace(/@(?:Image|Element|Video)\d+\b/g, (tag) => tagMap.get(tag) ?? tag);
-      const finalPrompt = elementNotes.length > 0 ? `${remapped} ${elementNotes.join(' ')}` : remapped;
-
-      const editing = isVideoEdit(promptData.prompt, connectedNodes);
-      const input: SeedanceReferenceToVideoInput = {
-        prompt: finalPrompt,
-        task: editing ? 'editing' : 'reference',
-        resolution: promptData.videoResolution,
-        generate_audio: promptData.generateAudio,
-      };
-      if (imageUrls.length > 0) input.image_urls = imageUrls;
-      if (videos.length > 0) input.video_urls = videos.map((v) => v.url);
-      if (!editing) {
-        // 'editing' coerces both to auto, so they're only sent for 'reference'
-        input.duration = promptData.duration;
-        input.aspect_ratio = promptData.aspectRatio;
-      }
-      return input;
+      return media;
     },
     [buildPromptText, getEdgeTag]
-  );
-
-  /**
-   * GPT Image 2.6 input: explicit size for text-to-image, 'auto' (follow inputs) for edits.
-   */
-  const buildImageInput = useCallback(
-    async (
-      promptNodeId: string,
-      promptData: PromptNodeData,
-      connectedNodes: NovaNode[],
-      model: ImageModel
-    ): Promise<ImageGenerationInput> => {
-      const prompt = buildPromptText(promptNodeId, promptData, connectedNodes);
-
-      if (model === 'openai/gpt-image-2.6/sunburst/text-to-image') {
-        return {
-          prompt,
-          image_size: getGptImageSize(promptData.imageAspectRatio, promptData.imageResolution),
-          quality: 'high',
-          num_images: 1,
-          output_format: 'png',
-        };
-      }
-
-      const imageUrls: string[] = [];
-      for (const node of connectedNodes) {
-        if (node.type === 'image') {
-          imageUrls.push(await resolveImageUrl(node.data as ImageNodeData));
-        } else if (node.type === 'element') {
-          imageUrls.push(...(await resolveElementUrls(node.data as ElementNodeData)));
-        } else if (node.type === 'output') {
-          const data = node.data as OutputNodeData;
-          if (data.outputType === 'image' && data.imageUrl) imageUrls.push(data.imageUrl);
-        }
-      }
-
-      if (imageUrls.length === 0) throw new Error('At least one image is required for image editing');
-      if (imageUrls.length > GPT_IMAGE_MAX_INPUTS) {
-        throw new Error(`Image editing accepts up to ${GPT_IMAGE_MAX_INPUTS} input images. You have ${imageUrls.length}.`);
-      }
-
-      return {
-        prompt,
-        image_urls: imageUrls,
-        image_size: 'auto',
-        quality: 'high',
-        num_images: 1,
-        output_format: 'png',
-      };
-    },
-    [buildPromptText]
-  );
-
-  /**
-   * LTX 2.5 audio-to-video input. First frame: an image wired into the Audio node,
-   * otherwise a Start Frame image connected to the prompt. Prompt is optional with an image.
-   */
-  const buildAudioToVideoInput = useCallback(
-    async (
-      promptNodeId: string,
-      promptData: PromptNodeData,
-      connectedNodes: NovaNode[],
-      model: AudioToVideoModel
-    ): Promise<{ input: LtxAudioToVideoInput; audioSeconds: number }> => {
-      const audioNode = getAudioSource(connectedNodes);
-      if (!audioNode) throw new Error('Connect an Audio node with a file for audio-to-video');
-      const audioData = audioNode.data as AudioNodeData;
-
-      const audioSeconds = audioData.duration || 0;
-      const maxSeconds = model === 'lightricks/ltx-2.5/audio-to-video/fast'
-        ? LTX_A2V_MAX_AUDIO_SECONDS.fast
-        : LTX_A2V_MAX_AUDIO_SECONDS.pro;
-      if (audioSeconds > 0 && (audioSeconds < LTX_A2V_MIN_AUDIO_SECONDS || audioSeconds > maxSeconds)) {
-        throw new Error(`Audio must be ${LTX_A2V_MIN_AUDIO_SECONDS}–${LTX_A2V_MAX_AUDIO_SECONDS.fast} seconds for audio-to-video (this clip is ${audioSeconds.toFixed(1)}s).`);
-      }
-
-      const { nodes: allNodes, edges: allEdges } = useCanvasStore.getState();
-      const upstreamImage = allEdges
-        .filter((e) => e.target === audioNode.id)
-        .map((e) => allNodes.find((n) => n.id === e.source))
-        .find((n): n is NovaNode =>
-          Boolean(n) &&
-          (n!.type === 'image' || (n!.type === 'output' && (n!.data as OutputNodeData).outputType === 'image'))
-        );
-      const firstFrameNode =
-        upstreamImage ??
-        connectedNodes.find((n) => n.type === 'image' && (n.data as ImageNodeData).role === 'start_frame');
-
-      let imageUrl: string | undefined;
-      if (firstFrameNode?.type === 'image') imageUrl = await resolveImageUrl(firstFrameNode.data as ImageNodeData);
-      else if (firstFrameNode?.type === 'output') imageUrl = (firstFrameNode.data as OutputNodeData).imageUrl;
-
-      const prompt = buildPromptText(promptNodeId, promptData, connectedNodes).trim();
-      if (!imageUrl && !prompt) throw new Error('Add a prompt or connect a first-frame image for audio-to-video');
-
-      const input: LtxAudioToVideoInput = {
-        audio_url: await resolveAudioUrl(audioData),
-        aspect_ratio: promptData.aspectRatio === '16:9' || promptData.aspectRatio === '9:16' ? promptData.aspectRatio : 'auto',
-      };
-      if (imageUrl) input.image_url = imageUrl;
-      if (prompt) input.prompt = prompt;
-      return { input, audioSeconds };
-    },
-    [buildPromptText]
   );
 
   /**
@@ -541,7 +388,7 @@ export function useGeneration() {
    * otherwise create an output node wired to the prompt. Then persist to R2.
    */
   const deliverOutput = useCallback(
-    (promptNode: NovaNode, promptData: PromptNodeData, output: OutputPayload) => {
+    (promptNode: NovaNode, promptData: PromptNodeData, output: OutputPayload, offset = { x: 400, y: 0 }) => {
       const isVideo = output.outputType === 'video';
       const nodeData = {
         outputType: output.outputType,
@@ -555,7 +402,7 @@ export function useGeneration() {
       };
       const persistUrls = isVideo ? { videoUrl: output.url } : { imageUrl: output.url };
 
-      const chainStepInfo = promptData.chainId
+      const chainStepInfo = promptData.chainId && offset.y === 0
         ? useChainStore.getState().getStepForPrompt(promptNode.id)
         : null;
 
@@ -568,7 +415,7 @@ export function useGeneration() {
 
       const outputNode = createNode(
         'output',
-        { x: promptNode.position.x + 400, y: promptNode.position.y },
+        { x: promptNode.position.x + offset.x, y: promptNode.position.y + offset.y },
         nodeData
       );
       addNode(outputNode);
@@ -596,13 +443,15 @@ export function useGeneration() {
 
       const promptData = promptNode.data as PromptNodeData;
       const connectedNodes = getConnectedInputs(promptNodeId);
+      const plan: GenerationPlan = planGeneration(promptData, connectedNodes);
 
-      if (!promptData.prompt.trim() && !getAudioSource(connectedNodes)) {
+      if (!promptData.prompt.trim() && plan.category !== 'lipsync') {
         throw new Error('Prompt is empty');
       }
+      if (plan.blocker) throw new Error(plan.blocker);
 
-      // Validate @tags against connections (video mode only)
-      if (promptData.mode === 'video' && connectedNodes.length > 0) {
+      // Validate @tags against connections
+      if (connectedNodes.length > 0) {
         const usedTags = connectedNodes
           .map((n) => getEdgeTag(n.id, promptNodeId))
           .filter(Boolean) as string[];
@@ -621,12 +470,10 @@ export function useGeneration() {
         }
       }
 
-      const plan = planGeneration(promptData, connectedNodes);
-
       updateNode(promptNodeId, {
         status: 'generating',
         progress: 0,
-        selectedModel: plan.model,
+        selectedModel: plan.endpoint,
         error: undefined,
       });
 
@@ -635,6 +482,10 @@ export function useGeneration() {
         if (update.status === 'IN_PROGRESS') {
           updateNode(promptNodeId, { status: 'generating', progress: 50 });
         }
+      };
+      const track = (endpoint: GenerationPlan['endpoint'], input: FalInput) => {
+        addToQueue({ id: requestId, promptNodeId, model: endpoint, input });
+        setActiveGeneration({ id: requestId, promptNodeId, model: endpoint, input, status: 'processing', createdAt: new Date() });
       };
 
       try {
@@ -648,140 +499,186 @@ export function useGeneration() {
           throw new Error(FAL_KEY_REQUIRED_MESSAGE);
         }
 
-        const baseMetadata = {
+        const media = await resolveMedia(promptNodeId, promptData, readyNodes);
+        const metadataFor = (cost: CostEstimate, extra: Partial<GenerationMetadata> & { requestId: string; aspectRatio: string }): GenerationMetadata => ({
           promptUsed: promptData.prompt,
-          modelUsed: plan.model,
+          modelUsed: plan.endpoint,
+          modelLabel: plan.modelLabel,
+          category: plan.category,
           inputNodes: connectedNodes.map((n) => n.id),
           createdAt: new Date(),
-          cost: plan.costUsd,
-          costBreakdown: plan.breakdown,
-          costIsEstimate: plan.isEstimate,
-        };
+          cost: cost.costUsd,
+          costBreakdown: cost.breakdown,
+          costIsEstimate: cost.isEstimate,
+          ...extra,
+        });
 
         let output: OutputPayload;
         let falRequestId: string | undefined;
-        let videoFile: { url: string; fileSize: number; fileName: string; contentType: string } | undefined;
 
-        if (plan.kind === 'image') {
-          const model = plan.model as ImageModel;
-          const input = await buildImageInput(promptNodeId, promptData, readyNodes, model);
-          addToQueue({ id: requestId, promptNodeId, model, input });
-          setActiveGeneration({ id: requestId, promptNodeId, model, input, status: 'processing', createdAt: new Date() });
-
-          const result = await generateImage({ model, input, onQueueUpdate });
+        if (plan.category === 'image' && plan.image) {
+          const request = buildImageRequest(plan.image, media);
+          track(request.endpoint, request.input);
+          const result = await runFal<FalInput, ImageGenerationOutput>(request.endpoint, request.input, onQueueUpdate);
           const image = result.data?.images[0];
           if (!result.success || !image) throw new Error(result.error || 'Image generation failed');
 
-          const requested = 'image_urls' in input
-            ? null
-            : getGptImageSize(promptData.imageAspectRatio, promptData.imageResolution);
-          const width = image.width ?? requested?.width ?? 0;
-          const height = image.height ?? requested?.height ?? 0;
+          const width = image.width ?? plan.image.size.width;
+          const height = image.height ?? plan.image.size.height;
           // Price the image fal actually rendered (edits follow the inputs' size)
-          const actualCost = width > 0 && height > 0 ? estimateImageCostFromPixels(width, height) : null;
+          const actual = plan.image.spec.price({
+            width,
+            height,
+            resolution: plan.image.resolution,
+            inputImages: plan.image.edit ? analyzeInputs(readyNodes).editInputs : 0,
+          });
           falRequestId = result.requestId;
           output = {
             outputType: 'image',
             url: image.url,
             dimensions: { width, height },
-            metadata: {
-              ...baseMetadata,
-              ...(actualCost && {
-                cost: actualCost.costUsd,
-                costBreakdown: actualCost.breakdown,
-                costIsEstimate: actualCost.isEstimate,
-              }),
-              aspectRatio: 'image_urls' in input ? 'auto' : promptData.imageAspectRatio,
-              resolution: promptData.imageResolution,
+            metadata: metadataFor(actual, {
+              modelUsed: request.endpoint,
+              aspectRatio: plan.image.edit ? 'auto' : plan.image.aspectRatio,
+              resolution: plan.image.resolution,
               requestId: result.requestId || requestId,
-            },
+            }),
           };
-        } else if (plan.kind === 'audio-to-video') {
-          const model = plan.model as AudioToVideoModel;
-          const { input, audioSeconds } = await buildAudioToVideoInput(promptNodeId, promptData, readyNodes, model);
-          addToQueue({ id: requestId, promptNodeId, model, input });
-          setActiveGeneration({ id: requestId, promptNodeId, model, input, status: 'processing', createdAt: new Date() });
+        } else if (plan.category === 'lipsync' && plan.lipsync) {
+          const lip = plan.lipsync;
+          let faceUrl: string | undefined;
+          let stillCost: CostEstimate | undefined;
 
-          const result = await generateAudioToVideo({ model, input, onQueueUpdate });
-          const video = result.data?.video;
-          if (!result.success || !video) throw new Error(result.error || 'Audio-to-video generation failed: no video returned');
+          if (lip.route === 'generated-face' && lip.still) {
+            // Step 1: generate the performer's portrait, keep it on the canvas for reuse
+            const stillRequest = buildImageRequest({ ...lip.still, edit: false }, { ...media, prompt: portraitPrompt(media) });
+            track(stillRequest.endpoint, stillRequest.input);
+            const still = await runFal<FalInput, ImageGenerationOutput>(stillRequest.endpoint, stillRequest.input, onQueueUpdate);
+            const image = still.data?.images[0];
+            if (!still.success || !image) throw new Error(still.error || 'Portrait generation failed');
+            faceUrl = image.url;
+            const width = image.width ?? lip.still.size.width;
+            const height = image.height ?? lip.still.size.height;
+            stillCost = lip.still.spec.price({ width, height, resolution: lip.still.resolution, inputImages: 0 });
+            deliverOutput(promptNode, promptData, {
+              outputType: 'image',
+              url: image.url,
+              dimensions: { width, height },
+              metadata: metadataFor(stillCost, {
+                modelUsed: stillRequest.endpoint,
+                modelLabel: lip.still.spec.label,
+                category: 'image',
+                aspectRatio: lip.still.aspectRatio,
+                resolution: lip.still.resolution,
+                requestId: still.requestId || requestId,
+              }),
+            }, { x: 400, y: -320 });
+          }
 
-          const duration = video.duration ?? audioSeconds;
-          // Billed on the input audio length
-          const actualCost = audioSeconds > 0 ? estimateAudioToVideoCost(model, audioSeconds) : null;
+          // Step 2: lip-sync
+          const request = buildLipSyncRequest(lip, media, faceUrl);
+          track(request.endpoint, request.input);
+          const result = await runFal<FalInput, LipSyncOutput>(request.endpoint, request.input, onQueueUpdate);
+          const url = firstVideoUrl(result.data);
+          if (!result.success || !url) throw new Error(result.error || 'Lip-sync failed: no video returned');
+
+          const seconds = result.data?.duration ?? lip.audioSeconds;
+          const lipCost = lip.spec.price({ seconds: seconds || lip.audioSeconds, resolution: lip.resolution });
+          const cost = stillCost
+            ? combineEstimates([{ label: 'portrait', estimate: stillCost }, { label: 'lip-sync', estimate: lipCost }])
+            : lipCost;
           falRequestId = result.requestId;
-          videoFile = {
-            url: video.url,
-            fileSize: video.file_size ?? 0,
-            fileName: video.file_name ?? 'ltx-video.mp4',
-            contentType: video.content_type ?? 'video/mp4',
-          };
           output = {
             outputType: 'video',
-            url: video.url,
-            videoDuration: duration,
-            dimensions: { width: video.width ?? 1920, height: video.height ?? 1080 },
-            metadata: {
-              ...baseMetadata,
-              ...(actualCost && {
-                cost: actualCost.costUsd,
-                costBreakdown: actualCost.breakdown,
-                costIsEstimate: actualCost.isEstimate,
-              }),
-              duration,
-              aspectRatio: input.aspect_ratio ?? 'auto',
+            url,
+            videoDuration: seconds || undefined,
+            dimensions: videoDimensions('1080p', promptData.aspectRatio),
+            metadata: metadataFor(cost, {
+              modelUsed: request.endpoint,
+              duration: seconds,
+              aspectRatio: 'auto',
+              resolution: lip.spec.resolutions.length > 0 ? lip.resolution : undefined,
               requestId: result.requestId || requestId,
-            },
+            }),
           };
-        } else {
-          const model = plan.model as VideoModel;
-          const input = await buildVideoInput(promptNodeId, promptData, readyNodes, model);
-          addToQueue({ id: requestId, promptNodeId, model, input });
-          setActiveGeneration({ id: requestId, promptNodeId, model, input, status: 'processing', createdAt: new Date() });
+        } else if (plan.audio) {
+          // Speech / sound / music → an Audio node on the canvas (ready for lip-sync and the timeline)
+          const spec = plan.audio.spec;
+          const request = buildAudioRequest(spec, promptData, media.prompt);
+          track(request.endpoint, request.input);
+          const result = await runFal<FalInput, AudioGenerationOutput>(request.endpoint, request.input, onQueueUpdate);
+          const audio = result.data?.audio;
+          if (!result.success || !audio?.url) throw new Error(result.error || 'Audio generation failed');
 
-          const result = await generateVideo({ model, input, onQueueUpdate });
-          const video = result.data?.video;
-          if (!result.success || !video) throw new Error(result.error || 'Video generation failed');
+          const seconds = audio.duration ?? result.data?.duration ?? (await probeRemoteAudio(audio.url));
+          const actual = spec.price({ characters: promptData.prompt.length, seconds: seconds || plan.audio.seconds });
+          const extension = audio.content_type?.includes('wav') ? 'wav' : 'mp3';
+          const audioNode = createNode(
+            'audio',
+            { x: promptNode.position.x + 400, y: promptNode.position.y },
+            {
+              audioUrl: audio.url,
+              remoteUrl: audio.url,
+              uploadStatus: 'completed',
+              fileName: audio.file_name || `${spec.kind}-${nanoid(6)}.${extension}`,
+              fileSize: audio.file_size ?? 0,
+              duration: seconds,
+              generationMetadata: metadataFor(seconds > 0 ? actual : plan, {
+                modelUsed: request.endpoint,
+                duration: seconds || undefined,
+                aspectRatio: 'n/a',
+                requestId: result.requestId || requestId,
+              }),
+            }
+          );
+          addNode(audioNode);
+          addEdge({
+            id: `edge-${nanoid()}`,
+            source: promptNode.id,
+            target: audioNode.id,
+            sourceHandle: 'output',
+            targetHandle: 'input',
+          });
+          updateNode(promptNodeId, { status: 'completed', progress: 100 });
+          completeGeneration(requestId, { success: true, requestId: result.requestId || requestId });
+          return;
+        } else if (plan.video) {
+          const video = plan.video;
+          const request = buildVideoRequest(video, media);
+          track(request.endpoint, request.input);
+          const result = await runFal<FalInput, VideoGenerationOutput>(request.endpoint, request.input, onQueueUpdate);
+          const url = firstVideoUrl(result.data);
+          if (!result.success || !url) throw new Error(result.error || 'Video generation failed');
 
-          const isEditTask = 'task' in input && input.task === 'editing';
-          const duration = isEditTask
-            ? getReferenceVideoSeconds(readyNodes) || parseInt(promptData.duration, 10)
-            : parseInt(promptData.duration, 10);
-          // Image-to-video and edits follow the source's framing
-          const aspectRatio = model === 'bytedance/seedance-2.5/us/image-to-video' || isEditTask
-            ? 'auto'
-            : promptData.aspectRatio;
+          const duration = video.editing
+            ? media.videos.reduce((s, v) => s + v.seconds, 0) || video.durationSeconds
+            : video.durationSeconds;
+          const aspectRatio = video.aspectFollowsFrame || video.editing ? 'auto' : video.aspectRatio;
           falRequestId = result.requestId;
-          videoFile = {
-            url: video.url,
-            fileSize: video.file_size ?? 0,
-            fileName: video.file_name ?? 'seedance-video.mp4',
-            contentType: video.content_type ?? 'video/mp4',
-          };
           output = {
             outputType: 'video',
-            url: video.url,
+            url,
             videoDuration: duration,
-            dimensions: videoDimensions(promptData.videoResolution, aspectRatio === 'auto' ? '16:9' : aspectRatio),
-            metadata: {
-              ...baseMetadata,
+            dimensions: videoDimensions(video.resolution, aspectRatio === 'auto' ? '16:9' : aspectRatio),
+            metadata: metadataFor(plan, {
+              modelUsed: request.endpoint,
               duration,
               aspectRatio,
-              resolution: promptData.videoResolution,
-              generateAudio: promptData.generateAudio,
+              resolution: video.resolution,
+              generateAudio: video.audio,
               requestId: result.requestId || requestId,
-            },
+            }),
           };
+        } else {
+          throw new Error('Nothing to generate');
         }
 
         deliverOutput(promptNode, promptData, output);
         updateNode(promptNodeId, { status: 'completed', progress: 100 });
         completeGeneration(requestId, {
           success: true,
-          video: videoFile,
           requestId: falRequestId || requestId,
         });
-
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         updateNode(promptNodeId, { status: 'error', error: errorMessage });
@@ -791,9 +688,7 @@ export function useGeneration() {
     [
       getConnectedInputs,
       getEdgeTag,
-      buildVideoInput,
-      buildImageInput,
-      buildAudioToVideoInput,
+      resolveMedia,
       deliverOutput,
       updateNode,
       addToQueue,
@@ -811,7 +706,7 @@ export function useGeneration() {
       const promptNode = useCanvasStore.getState().nodes.find((n) => n.id === promptNodeId);
       if (!promptNode || promptNode.type !== 'prompt') return null;
       const plan = planGeneration(promptNode.data as PromptNodeData, getConnectedInputs(promptNodeId));
-      return { cost: plan.costUsd, breakdown: plan.breakdown, model: getModelDisplayName(plan.model) };
+      return { cost: plan.costUsd, breakdown: plan.breakdown, model: getModelDisplayName(plan.endpoint) };
     },
     [getConnectedInputs]
   );

@@ -145,8 +145,9 @@ export function FloatingToolbar() {
 
       console.log('[Character from Prompt] Frontal generated:', frontalImageUrl);
 
-      // Step 2: Side and back views in parallel
-      const [sideImageUrl, backImageUrl] = await generateCharacterViews(frontalImageUrl);
+      // Step 2: Full turnaround (three-quarter, side, back, face close-up) in parallel
+      const views = await generateCharacterViews(frontalImageUrl);
+      const viewUrls = views.map((v) => v.url);
 
       console.log('[Character from Prompt] All views generated');
 
@@ -166,11 +167,12 @@ export function FloatingToolbar() {
           frontalThumbnail: frontalImageUrl,
           frontalRemoteUrl: frontalImageUrl,
           frontalUploadStatus: 'completed',
-          referenceImageUrls: [],
-          referenceThumbnails: [],
-          generatedReferenceUrls: [sideImageUrl, backImageUrl],
-          generatedReferenceThumbnails: [sideImageUrl, backImageUrl],
-          referenceRemoteUrls: [sideImageUrl, backImageUrl],
+          generatedReferenceUrls: viewUrls,
+          generatedReferenceThumbnails: viewUrls,
+          generatedReferenceLabels: views.map((v) => v.view),
+          referenceImageUrls: viewUrls,
+          referenceThumbnails: viewUrls,
+          referenceRemoteUrls: viewUrls,
           referenceUploadStatus: 'completed',
         }
       );

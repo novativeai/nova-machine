@@ -1,15 +1,15 @@
 import { fal } from '@fal-ai/client';
 import type {
-  AudioToVideoModel,
   FalQueueUpdate,
+  ImageEndpoint,
   ImageGenerationInput,
   ImageGenerationOutput,
-  ImageModel,
-  LtxAudioToVideoInput,
-  LtxAudioToVideoOutput,
+  LipSyncEndpoint,
+  LipSyncInput,
+  LipSyncOutput,
+  VideoEndpoint,
   VideoGenerationInput,
   VideoGenerationOutput,
-  VideoModel,
 } from '@/types';
 import { formatErrorForDisplay } from './errors';
 import { useSettingsStore } from '@/stores/settings-store';
@@ -79,7 +79,7 @@ export async function runFal<TInput extends object, TOutput>(
 }
 
 export function generateVideo(options: {
-  model: VideoModel;
+  model: VideoEndpoint;
   input: VideoGenerationInput;
   onQueueUpdate?: (update: FalQueueUpdate) => void;
 }): Promise<FalRunResult<VideoGenerationOutput>> {
@@ -87,19 +87,19 @@ export function generateVideo(options: {
 }
 
 export function generateImage(options: {
-  model: ImageModel;
+  model: ImageEndpoint;
   input: ImageGenerationInput;
   onQueueUpdate?: (update: FalQueueUpdate) => void;
 }): Promise<FalRunResult<ImageGenerationOutput>> {
   return runFal<ImageGenerationInput, ImageGenerationOutput>(options.model, options.input, options.onQueueUpdate);
 }
 
-export function generateAudioToVideo(options: {
-  model: AudioToVideoModel;
-  input: LtxAudioToVideoInput;
+export function generateLipSync(options: {
+  model: LipSyncEndpoint;
+  input: LipSyncInput;
   onQueueUpdate?: (update: FalQueueUpdate) => void;
-}): Promise<FalRunResult<LtxAudioToVideoOutput>> {
-  return runFal<LtxAudioToVideoInput, LtxAudioToVideoOutput>(options.model, options.input, options.onQueueUpdate);
+}): Promise<FalRunResult<LipSyncOutput>> {
+  return runFal<LipSyncInput, LipSyncOutput>(options.model, options.input, options.onQueueUpdate);
 }
 
 // ============================================================================
@@ -117,33 +117,44 @@ export async function uploadFile(file: File): Promise<string> {
   return url;
 }
 
-/** Prompt for the side/back turnaround views used to build character elements. */
-export function characterViewPrompt(view: 'side' | 'back'): string {
-  return `${view === 'side' ? 'Side' : 'Back'} view of the same character, same style and appearance, same clothing and colors, full body, plain background`;
+export type CharacterView = 'three-quarter' | 'side' | 'back' | 'face';
+
+/** Turnaround views generated for every character: the identity references all models receive. */
+export const CHARACTER_VIEWS: readonly CharacterView[] = ['three-quarter', 'side', 'back', 'face'];
+
+const VIEW_DESCRIPTIONS: Record<CharacterView, string> = {
+  'three-quarter': 'Three-quarter front view of the same character, full body',
+  side: 'Side profile view of the same character, full body',
+  back: 'Back view of the same character, full body',
+  face: 'Close-up portrait of the same character facing the camera, head and shoulders, mouth relaxed and clearly visible',
+};
+
+/** Prompt for one turnaround view. */
+export function characterViewPrompt(view: CharacterView): string {
+  return `${VIEW_DESCRIPTIONS[view]}. Identical face, hairstyle, skin tone, body shape, clothing, colors and accessories; same art style; neutral pose; plain light-grey studio background; no text.`;
 }
 
 /**
- * Generate side + back views of a character from one image with GPT Image 2.6 edit.
- * Returns [sideUrl, backUrl]; throws on failure.
+ * Character turnaround from one image with GPT Image 2.6 edit (the most faithful editor):
+ * three-quarter, side, back and face close-up, in that order. Throws if any view fails.
  */
-export async function generateCharacterViews(imageUrl: string): Promise<[string, string]> {
-  const run = (view: 'side' | 'back') =>
-    generateImage({
-      model: 'openai/gpt-image-2.6/sunburst/edit',
-      input: {
-        prompt: characterViewPrompt(view),
-        image_urls: [imageUrl],
-        image_size: 'auto',
-        quality: 'high',
-        num_images: 1,
-        output_format: 'png',
-      },
-    });
-  const [side, back] = await Promise.all([run('side'), run('back')]);
-  const sideUrl = side.data?.images[0]?.url;
-  const backUrl = back.data?.images[0]?.url;
-  if (!sideUrl || !backUrl) {
-    throw new Error(side.error || back.error || 'Failed to generate character views');
-  }
-  return [sideUrl, backUrl];
+export async function generateCharacterViews(imageUrl: string): Promise<Array<{ view: CharacterView; url: string }>> {
+  const results = await Promise.all(
+    CHARACTER_VIEWS.map((view) =>
+      generateImage({
+        model: 'openai/gpt-image-2.6/sunburst/edit',
+        input: {
+          prompt: characterViewPrompt(view),
+          image_urls: [imageUrl],
+          image_size: 'auto',
+          quality: 'high',
+          num_images: 1,
+          output_format: 'png',
+        },
+      }).then((result) => ({ view, result }))
+    )
+  );
+  const failed = results.find(({ result }) => !result.data?.images[0]?.url);
+  if (failed) throw new Error(failed.result.error || `Failed to generate the ${failed.view} view`);
+  return results.map(({ view, result }) => ({ view, url: result.data!.images[0].url }));
 }

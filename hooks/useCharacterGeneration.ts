@@ -9,7 +9,7 @@ import type { ElementNodeData } from '@/types';
 
 /**
  * Hook for generating character ElementNodes from an image.
- * Generates side and back views in parallel and creates a connected ElementNode.
+ * Generates a four-view turnaround in parallel and creates a connected ElementNode.
  * After generation, persists fal.ai output URLs to R2 for permanent storage.
  */
 export function useCharacterGeneration() {
@@ -40,30 +40,20 @@ export function useCharacterGeneration() {
       updateNode(imageNodeId, { isGeneratingCharacter: true });
 
       try {
-        // Side and back views in parallel (GPT Image 2.6 edit)
-        const [sideImageUrl, backImageUrl] = await generateCharacterViews(imageUrl);
+        // Full turnaround in parallel (three-quarter, side, back, face close-up)
+        const views = await generateCharacterViews(imageUrl);
 
-        // Persist generated images to R2 for permanent storage (async, non-blocking for node creation)
-        let persistedSideUrl = sideImageUrl;
-        let persistedBackUrl = backImageUrl;
-
-        const persistPromise = (async () => {
-          if (!user) return;
+        // Character refs need permanent URLs: persist to R2 before creating the node
+        let viewUrls = views.map((v) => v.url);
+        if (user) {
           try {
             const token = await user.getIdToken();
-            const r2Map = await persistUrlsToR2(token, [
-              { url: sideImageUrl, category: 'characters' },
-              { url: backImageUrl, category: 'characters' },
-            ]);
-            persistedSideUrl = r2Map.get(sideImageUrl) || sideImageUrl;
-            persistedBackUrl = r2Map.get(backImageUrl) || backImageUrl;
+            const r2Map = await persistUrlsToR2(token, viewUrls.map((url) => ({ url, category: 'characters' as const })));
+            viewUrls = viewUrls.map((url) => r2Map.get(url) || url);
           } catch (error) {
             console.warn('[Character Generation] R2 persist failed, using fal.ai URLs:', error);
           }
-        })();
-
-        // Wait for R2 persist before creating node (character refs need permanent URLs)
-        await persistPromise;
+        }
 
         // Create ElementNode with persisted references
         const characterName = getNextCharacterName();
@@ -76,8 +66,9 @@ export function useCharacterGeneration() {
           {
             name: characterName,
             elementType: 'character',
-            generatedReferenceUrls: [persistedSideUrl, persistedBackUrl],
-            generatedReferenceThumbnails: [persistedSideUrl, persistedBackUrl],
+            generatedReferenceUrls: viewUrls,
+            generatedReferenceThumbnails: viewUrls,
+            generatedReferenceLabels: views.map((v) => v.view),
           }
         );
 
@@ -107,6 +98,92 @@ export function useCharacterGeneration() {
     [addNode, addEdge, updateNode, getNextCharacterName, user]
   );
 
+  /**
+   * Fill an existing character with the four-view turnaround generated from its frontal image.
+   * Views already wired in by hand are kept; generated views replace earlier generated ones.
+   */
+  const generateTurnaround = useCallback(
+    async (elementId: string) => {
+      const node = useCanvasStore.getState().nodes.find((n) => n.id === elementId);
+      if (!node || node.type !== 'element') return;
+      const data = node.data as ElementNodeData;
+      const frontal = data.frontalRemoteUrl || (data.frontalImageUrl.startsWith('https://') ? data.frontalImageUrl : '');
+      if (!frontal) {
+        updateNode(elementId, { characterGenerationError: 'Wait for the frontal image to finish uploading.' });
+        return;
+      }
+      updateNode(elementId, { isGeneratingCharacter: true });
+      try {
+        const views = await generateCharacterViews(frontal);
+        let viewUrls = views.map((v) => v.url);
+        if (user) {
+          try {
+            const token = await user.getIdToken();
+            const r2Map = await persistUrlsToR2(token, viewUrls.map((url) => ({ url, category: 'characters' as const })));
+            viewUrls = viewUrls.map((url) => r2Map.get(url) || url);
+          } catch (error) {
+            console.warn('[Turnaround] R2 persist failed, using fal.ai URLs:', error);
+          }
+        }
+        const previousGenerated = new Set(data.generatedReferenceUrls ?? []);
+        const manualUrls = data.referenceImageUrls.filter((u) => !previousGenerated.has(u));
+        const manualThumbs = data.referenceThumbnails.filter((_, i) => !previousGenerated.has(data.referenceImageUrls[i]));
+        const manualRemote = (data.referenceRemoteUrls ?? []).filter((u) => !previousGenerated.has(u));
+        const allRemote = manualRemote.length === manualUrls.length;
+        updateNode(elementId, {
+          generatedReferenceUrls: viewUrls,
+          generatedReferenceThumbnails: viewUrls,
+          generatedReferenceLabels: views.map((v) => v.view),
+          referenceImageUrls: [...manualUrls, ...viewUrls],
+          referenceThumbnails: [...manualThumbs, ...viewUrls],
+          referenceRemoteUrls: allRemote ? [...manualRemote, ...viewUrls] : data.referenceRemoteUrls,
+          referenceUploadStatus: allRemote ? 'completed' : data.referenceUploadStatus,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Turnaround failed';
+        updateNode(elementId, { characterGenerationError: message });
+      } finally {
+        updateNode(elementId, { isGeneratingCharacter: false });
+      }
+    },
+    [updateNode, user]
+  );
+
+  /**
+   * Ask Claude for the character's identity lock (fixed visual traits) from its images.
+   */
+  const describeCharacter = useCallback(
+    async (elementId: string) => {
+      const node = useCanvasStore.getState().nodes.find((n) => n.id === elementId);
+      if (!node || node.type !== 'element' || !user) return;
+      const data = node.data as ElementNodeData;
+      const imageUrls = [data.frontalRemoteUrl ?? data.frontalImageUrl, ...(data.referenceRemoteUrls ?? data.referenceImageUrls)]
+        .filter((u): u is string => Boolean(u) && u.startsWith('https://'));
+      if (imageUrls.length === 0) {
+        updateNode(elementId, { characterGenerationError: 'Add an uploaded frontal image first.' });
+        return;
+      }
+      updateNode(elementId, { isDescribing: true });
+      try {
+        const token = await user.getIdToken();
+        const response = await fetch('/api/ai/describe-character', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ name: data.name, kind: data.elementType, imageUrls }),
+        });
+        const json: { appearance?: string; error?: string } = await response.json();
+        if (!response.ok || !json.appearance) throw new Error(json.error || 'Description failed');
+        updateNode(elementId, { appearance: json.appearance });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Description failed';
+        updateNode(elementId, { characterGenerationError: message });
+      } finally {
+        updateNode(elementId, { isDescribing: false });
+      }
+    },
+    [updateNode, user]
+  );
+
   // Cleanup pending error timers on unmount
   useEffect(() => {
     return () => {
@@ -115,5 +192,5 @@ export function useCharacterGeneration() {
     };
   }, []);
 
-  return { generateCharacter, getNextCharacterName };
+  return { generateCharacter, generateTurnaround, describeCharacter, getNextCharacterName };
 }
