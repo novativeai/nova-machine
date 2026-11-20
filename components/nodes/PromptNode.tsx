@@ -479,7 +479,7 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
       />
 
       {/* Header - Drag Handle */}
-      <div className="nova-drag-handle mb-3 flex items-center justify-between">
+      <div className="nova-drag-handle mb-2 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <TimelineToggle nodeId={id} />
           <div className={cn(
@@ -502,53 +502,36 @@ function PromptNodeComponent({ id, data, selected }: PromptNodeProps) {
             </span>
           )}
         </div>
+      </div>
 
-        {/* Mode Switcher */}
-        <div
-          className="flex h-7 items-center rounded-lg bg-secondary p-0.5"
-          onMouseDown={(e) => e.stopPropagation()}
-        >
+      {/* Mode: what this prompt makes */}
+      <div
+        className="mb-2 grid grid-cols-3 gap-0.5 rounded-lg bg-secondary p-0.5"
+        onMouseDown={(e) => e.stopPropagation()}
+        role="radiogroup"
+        aria-label="Output type"
+      >
+        {([
+          { mode: 'image', label: 'Image', icon: ImageIcon, active: 'text-blue-400' },
+          { mode: 'video', label: 'Video', icon: Film, active: 'text-primary' },
+          { mode: 'audio', label: 'Audio', icon: AudioLines, active: 'text-emerald-400' },
+        ] as const).map(({ mode, label, icon: Icon, active }) => (
           <button
-            onClick={() => updateNode(id, { mode: 'image' as PromptMode })}
-            className={cn(
-              'flex h-6 items-center gap-1 rounded-md px-2 text-xs font-medium transition-all',
-              isImageMode
-                ? 'bg-background text-blue-500 shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-            )}
+            key={mode}
+            type="button"
+            role="radio"
+            aria-checked={data.mode === mode}
+            onClick={() => updateNode(id, { mode: mode as PromptMode })}
             disabled={isGenerating}
-          >
-            <ImageIcon className="h-3 w-3" />
-            Image
-          </button>
-          <button
-            onClick={() => updateNode(id, { mode: 'video' as PromptMode })}
             className={cn(
-              'flex h-6 items-center gap-1 rounded-md px-2 text-xs font-medium transition-all',
-              data.mode === 'video'
-                ? 'bg-background text-primary shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
+              'flex h-6 items-center justify-center gap-1 rounded-md text-xs font-medium transition-all',
+              data.mode === mode ? cn('bg-background shadow-sm', active) : 'text-muted-foreground hover:text-foreground'
             )}
-            disabled={isGenerating}
           >
-            <Film className="h-3 w-3" />
-            Video
+            <Icon className="h-3 w-3" />
+            {label}
           </button>
-          <button
-            onClick={() => updateNode(id, { mode: 'audio' as PromptMode })}
-            className={cn(
-              'flex h-6 items-center gap-1 rounded-md px-2 text-xs font-medium transition-all',
-              isAudioMode
-                ? 'bg-background text-emerald-400 shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-            )}
-            disabled={isGenerating}
-            title="Speech, sound and music"
-          >
-            <AudioLines className="h-3 w-3" />
-            Audio
-          </button>
-        </div>
+        ))}
       </div>
 
       {/* Audio kind: speech / sound (speech + effects) / music */}

@@ -7,6 +7,8 @@ import { activeVisualAt, isAudible, sourceTime, type TimelineClip } from '@/lib/
 
 interface TimelinePreviewProps {
   clips: TimelineClip[];
+  /** Hide the built-in "nothing here" hint when the host shows its own. */
+  hideEmptyHint?: boolean;
 }
 
 /** Drift allowed before a playing element is re-seeked (seconds). */
@@ -17,7 +19,7 @@ const SCRUB_TOLERANCE = 0.03;
  * Programme monitor: shows the topmost visible clip at the playhead and plays every
  * audible layer in sync with the transport. Media elements stay mounted so cuts are instant.
  */
-function TimelinePreviewComponent({ clips }: TimelinePreviewProps) {
+function TimelinePreviewComponent({ clips, hideEmptyHint = false }: TimelinePreviewProps) {
   const currentTime = useTimelineStore((s) => s.currentTime);
   const isPlaying = useTimelineStore((s) => s.isPlaying);
   const mediaRefs = useRef(new Map<string, HTMLMediaElement>());
@@ -93,7 +95,7 @@ function TimelinePreviewComponent({ clips }: TimelinePreviewProps) {
             preload="auto"
           />
         ))}
-      {!active && (
+      {!active && !hideEmptyHint && (
         <div className="pointer-events-none flex flex-col items-center gap-1 text-white/25">
           <Film className="h-5 w-5" />
           <span className="text-[10px]">{clips.some((c) => c.track === 'visual') ? 'No picture at playhead' : 'Add a video or image layer'}</span>

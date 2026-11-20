@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { Hash, X, Plus } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -49,24 +49,21 @@ export function HashtagInput({
 }: HashtagInputProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [inputValue, setInputValue] = useState('');
-  const [filteredSuggestions, setFilteredSuggestions] = useState<string[]>([]);
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Filter suggestions based on input
-  useEffect(() => {
-    if (!inputValue.trim()) {
-      setFilteredSuggestions([]);
-      return;
-    }
-    const query = inputValue.toLowerCase().replace(/^#/, '');
-    const filtered = suggestions
-      .filter((s) => s.toLowerCase().includes(query) && !tags.includes(s))
-      .slice(0, 5);
-    setFilteredSuggestions(filtered);
-    setSelectedSuggestionIndex(0);
+  // Suggestions matching the input (derived, so new tag/suggestion arrays can't loop renders)
+  const filteredSuggestions = useMemo(() => {
+    const query = inputValue.toLowerCase().replace(/^#/, '').trim();
+    if (!query) return [];
+    return suggestions.filter((s) => s.toLowerCase().includes(query) && !tags.includes(s)).slice(0, 5);
   }, [inputValue, suggestions, tags]);
+
+  // Highlight the first match whenever the query changes
+  useEffect(() => {
+    setSelectedSuggestionIndex(0);
+  }, [inputValue]);
 
   const handleAddTag = useCallback(
     (tag: string) => {

@@ -104,7 +104,7 @@ export function ProgramViewer() {
           style={{ width: frame.width, height: frame.height }}
           onClick={() => end > 0 && togglePlay()}
         >
-          <TimelinePreview clips={clips} />
+          <TimelinePreview clips={clips} hideEmptyHint={end <= 0} />
           {safeGuides && (
             <div className="pointer-events-none absolute inset-0">
               {/* Action safe 93%, title safe 90% */}

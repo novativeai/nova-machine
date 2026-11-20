@@ -46,8 +46,11 @@ const ELEVEN_VOICES = ['Aria', 'Roger', 'Sarah', 'Laura', 'Charlie', 'George', '
 const GEMINI_VOICES = ['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede', 'Zephyr', 'Leda', 'Orus', 'Achernar', 'Achird', 'Algenib', 'Algieba', 'Alnilam', 'Autonoe', 'Callirrhoe', 'Despina', 'Enceladus', 'Erinome', 'Gacrux', 'Iapetus', 'Laomedeia', 'Pulcherrima', 'Rasalgethi', 'Sadachbia', 'Sadaltager', 'Schedar', 'Sulafat', 'Umbriel', 'Vindemiatrix', 'Zubenelgenubi'] as const;
 
 function perThousandChars(rate: number, characters: number): CostEstimate {
-  const chars = Math.max(1, characters);
-  return { costUsd: (rate * chars) / 1000, breakdown: `${chars} chars × ${formatRate(rate)}/1K`, isEstimate: false };
+  return {
+    costUsd: (rate * characters) / 1000,
+    breakdown: `${characters} char${characters === 1 ? '' : 's'} × ${formatRate(rate)}/1K`,
+    isEstimate: false,
+  };
 }
 
 export const SPEECH_MODELS: Record<SpeechModelId, AudioModelSpec> = {

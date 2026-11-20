@@ -5,6 +5,7 @@ import { Hash, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
 import { useProjectStore, useCanvasStore } from '@/stores';
+import { useShallow } from 'zustand/react/shallow';
 
 // Tag color palette (same as HashtagInput)
 const TAG_COLORS = [
@@ -52,16 +53,17 @@ export const HashtagFilter = memo(function HashtagFilter() {
   const clearFilters = useProjectStore((s) => s.clearHashtagFilters);
   // FIX: Use a stable selector that computes tags from nodes directly
   // This avoids calling a function in render that returns a new array each time
-  const allTags = useCanvasStore((s) => {
-    const tags = new Set<string>();
-    for (const node of s.nodes) {
-      const nodeTags = node.data.hashtags || [];
-      for (const tag of nodeTags as string[]) {
-        tags.add(tag);
+  // useShallow: the selector builds a new array, so compare by contents (a new array per
+  // read would make React re-render forever)
+  const allTags = useCanvasStore(
+    useShallow((s) => {
+      const tags = new Set<string>();
+      for (const node of s.nodes) {
+        for (const tag of (node.data.hashtags ?? []) as string[]) tags.add(tag);
       }
-    }
-    return Array.from(tags).sort();
-  });
+      return Array.from(tags).sort();
+    })
+  );
 
   // Don't render if no tags exist
   if (allTags.length === 0) return null;

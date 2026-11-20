@@ -5,6 +5,9 @@ import { cn } from '@/lib/utils';
 import { useCanvasStore, useProjectStore } from '@/stores';
 import { HashtagInput } from '@/components/ui/HashtagInput';
 
+/** Stable empty list: a fresh [] per store read would re-render forever. */
+const NO_TAGS: string[] = [];
+
 interface HashtagBadgesProps {
   nodeId: string;
   className?: string;
@@ -27,7 +30,7 @@ export const HashtagBadges = memo(function HashtagBadges({
     useCallback(
       (s) => {
         const node = s.nodes.find((n) => n.id === nodeId);
-        return (node?.data?.hashtags as string[]) || [];
+        return (node?.data?.hashtags as string[] | undefined) ?? NO_TAGS;
       },
       [nodeId]
     )

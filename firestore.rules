@@ -88,9 +88,15 @@ service cloud.firestore {
       // - Owner can always read
       // - Collaborators can read if they're in collaboratorIds
       // - Anyone can read if board is public
-      allow read: if isBoardOwner(boardId) ||
-                     request.auth.uid in resource.data.collaboratorIds ||
-                     isBoardPublic(boardId);
+      // Uses the board's own fields (not get()) so list queries like
+      // where('userId','==',uid) and where('collaboratorIds','array-contains',uid) can be allowed.
+      allow read: if isSignedIn() && (
+                       resource.data.get('userId', '') == request.auth.uid ||
+                       resource.data.get('ownerId', '') == request.auth.uid ||
+                       request.auth.uid in resource.data.get('collaboratorIds', []) ||
+                       resource.data.get('visibility', '') == 'public' ||
+                       resource.data.get('isPublic', false) == true
+                     );
 
       // Create: Any authenticated user can create a board
       allow create: if isSignedIn() &&
